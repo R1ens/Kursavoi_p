@@ -1,8 +1,21 @@
 # -*- coding: cp1251 -*-
+
 # -*- coding: utf-8 -*-
+"""
+Полный перевод C++ кода на Python с учётом:
+- защита от вырожденного Якобиана (псевдообратная матрица),
+- ограничение числа итераций в solve_bound,
+- интегрирование с логом для построения 6 таблиц,
+- сохранены исходные шаги конечной разности.
+
+ВНИМАНИЕ: блок с оптимизацией и чувствительностями очень тяжёлый по вычислениям.
+Если упрётся во время, его можно закомментировать (ниже помечено).
+"""
+
 import math
 from dataclasses import dataclass
 from typing import Callable, List, Dict, Tuple
+
 import numpy as np
 from concurrent.futures import ThreadPoolExecutor
 
@@ -10,6 +23,7 @@ from concurrent.futures import ThreadPoolExecutor
 # ============================
 #   Структуры данных
 # ============================
+
 
 @dataclass
 class State:
@@ -45,6 +59,7 @@ Matrix2 = np.ndarray
 # ============================
 #   Вспомогательные функции физики
 # ============================
+
 
 def calculate_gravity(mu: float, x: float, y: float, R: float) -> Tuple[float, float]:
     """Гравитационное ускорение."""
@@ -105,6 +120,7 @@ def calculate_derivatives(P: float,
 # ============================
 #   Рунге–Кутта 4-го порядка
 # ============================
+
 
 def runge_kutta4(t: float,
                  dt: float,
@@ -180,6 +196,7 @@ def runge_kutta4(t: float,
 #   Утилиты
 # ============================
 
+
 def calc_vel(Vx: float, Vy: float) -> float:
     """Модуль скорости."""
     return math.sqrt(Vx ** 2 + Vy ** 2)
@@ -192,10 +209,7 @@ def delta(t: float,
           base_dt: float,
           change: bool,
           thrust_on: bool) -> Tuple[float, bool, bool]:
-    """
-    Адаптивный шаг интегрирования (точно по C++-функции delta).
-    Возвращает (новый dt, change, thrust_on).
-    """
+    """Адаптивный шаг интегрирования (как в оригинале)."""
     if abs(t - t_1) < dt and not change:
         dt = t_1 - t
         change = True
@@ -212,8 +226,9 @@ def delta(t: float,
 
 
 # ============================
-#   Интегрирование (без логов)
+#   Интегрирование
 # ============================
+
 
 def integrate(theta_2: float,
               d_theta: float,
@@ -227,10 +242,7 @@ def integrate(theta_2: float,
               t_2: float,
               m0: float,
               tetta: float = math.pi) -> State:
-    """
-    Интегрирование до достижения краевой скорости v_k.
-    Никакого вывода в консоль — только итоговое состояние.
-    """
+    """Интегрирование до достижения краевой скорости v_k. Без логов."""
     state = State(0.0, 0.0, 0.0, 0.0, m0)
     prev_state = state
 
@@ -269,10 +281,6 @@ def integrate(theta_2: float,
     return state
 
 
-# ============================
-#   Интегрирование с логом (для таблиц)
-# ============================
-
 def integrate_with_log(theta_2: float,
                        d_theta: float,
                        P: float,
@@ -286,10 +294,7 @@ def integrate_with_log(theta_2: float,
                        m0: float,
                        tetta: float = math.pi
                        ) -> Tuple[State, List[Dict[str, float]]]:
-    """
-    То же интегрирование, но с накоплением таблицы:
-    N, t, m, Vx, Vy, x, y, theta_deg.
-    """
+    """Интегрирование с логом (для таблиц)."""
     state = State(0.0, 0.0, 0.0, 0.0, m0)
     prev_state = state
 
@@ -363,12 +368,14 @@ def print_table(title: str, log: List[Dict[str, float]]) -> None:
 #   Краевая задача
 # ============================
 
+
 def calculate_jacobian(F: Callable[[Vector2], Vector2],
-                       U: Vector2,
-                       h_d_tetta: float,
-                       h_tetta_2: float) -> Matrix2:
+                        U: Vector2,
+                        h_d_tetta: float,
+                        h_tetta_2: float) -> Matrix2:
     """Якобиан по [theta_2, d_theta] через конечные разности."""
     J = np.zeros((2, 2), dtype=float)
+
     F_U = F(U)
 
     U1 = U.copy()
@@ -406,13 +413,13 @@ def calculate_residuals(state: State, r_k: float, R: float) -> Vector2:
 
 
 def inverse_matrix(J: Matrix2) -> Matrix2:
-    """Обратная матрица 2x2 с проверкой вырождения."""
+    """Обратная матрица 2x2 с fallback на псевдообратную."""
     det = np.linalg.det(J)
-    if abs(det) > 0.0:
+    if abs(det) > 1e-10:
         return np.linalg.inv(J)
     else:
-        print("матрица вырождена")
-        return np.zeros((2, 2), dtype=float)
+        print("матрица вырождена, используем псевдообратную")
+        return np.linalg.pinv(J)
 
 
 def solve_bound(tetta_2: float,
@@ -427,10 +434,7 @@ def solve_bound(tetta_2: float,
                 R: float,
                 m0: float,
                 h_isl: float) -> Vector2:
-    """
-    Решение краевой задачи (подбор theta_2 и d_theta),
-    метод Ньютона через Якобиан.
-    """
+    """Решение краевой задачи (подбор theta_2 и d_theta)."""
     tol_tetta = 1e-5
     tol_r = 1e-3
     delta_d_tetta = 1e-4
@@ -440,7 +444,10 @@ def solve_bound(tetta_2: float,
     r_diff = 1.0
     theta_diff = 1.0
 
-    while abs(theta_diff) > tol_tetta or abs(r_diff) > tol_r:
+    max_iter = 30
+    iter_count = 0
+
+    while (abs(theta_diff) > tol_tetta or abs(r_diff) > tol_r) and iter_count < max_iter:
         F_state = integrate(U_i[0], U_i[1], P, dt, mu, R, P / W,
                             V_k, t1, t_2, m0)
         residuals = calculate_residuals(F_state, R + h_isl, R)
@@ -461,12 +468,18 @@ def solve_bound(tetta_2: float,
 
         print(f"theta_2 = {U_i[0]}  d_tetta = {U_i[1]}  m(tk) = {F_state.m}")
 
+        iter_count += 1
+
+    if iter_count == max_iter:
+        print("Внимание: solve_bound не сошёлся за max_iter, U =", U_i)
+
     return U_i
 
 
 # ============================
 #   Градиент и Гессе целевой
 # ============================
+
 
 def calculate_grad(X: Vector2,
                    bound_params: Vector2,
@@ -480,15 +493,12 @@ def calculate_grad(X: Vector2,
                    W: float,
                    h_isl: float,
                    m0: float) -> Vector2:
-    """
-    Численный градиент g(t1, t2) = -m(final) по t1, t2
-    (центральные разности, параллельно).
-    """
+    """Численный градиент g(t1, t2) = -m(final) по t1, t2."""
 
     def eval_shifted(t1_shift: float, t2_shift: float) -> float:
         bp = solve_bound(bound_params[0], bound_params[1], P, W, dt,
                          V_k, X[0] + t1_shift, X[1] + t2_shift,
-                         mu, R, 3000.0, h_isl)   # как в C++
+                         mu, R, 3000.0, h_isl)
         final_state = integrate(bp[0], bp[1], P, dt, mu, R, P / W,
                                 V_k, X[0] + t1_shift, X[1] + t2_shift, m0)
         return -final_state.m
@@ -558,6 +568,7 @@ def calculate_hessian(X: Vector2,
 #   Оптимизация (Левенберг–Марквардт)
 # ============================
 
+
 def optimization(t_1: float,
                  t_2: float,
                  P: float,
@@ -570,10 +581,7 @@ def optimization(t_1: float,
                  h_isl: float,
                  tetta_2: float,
                  d_tetta: float) -> OptimizationRes:
-    """
-    Основной цикл оптимизации по t1, t2.
-    Очень тяжёлая часть — при необходимости можно не вызывать из main().
-    """
+    """Основной цикл оптимизации по t1, t2."""
     tol = 1e-3
     max_iter = 100
     alpha = 100.0
@@ -592,7 +600,7 @@ def optimization(t_1: float,
                                 P / W, V_k, X[0], X[1], m0)
         g = -final_state.m
 
-        print(f"iter {i}: tetta_2 = {bound_params[0]}  d_tetta = {bound_params[1]}  "
+        print(f"opt iter {i}: tetta_2 = {bound_params[0]}  d_tetta = {bound_params[1]}  "
               f"t1 = {X[0]}  t2 = {X[1]}  g = {g}")
 
         delta_t1 = 1.0
@@ -631,8 +639,9 @@ def optimization(t_1: float,
 
 
 # ============================
-#   Производные по массам (как в C++)
+#   Производные по массам
 # ============================
+
 
 def calculate_mass_derivatives(P: float,
                                W: float,
@@ -683,8 +692,9 @@ def calculate_mass_derivatives(P: float,
 
 
 # ============================
-#   Main: считаем 6 таблиц
+#   Main: 6 таблиц + (опционально) оптимизация
 # ============================
+
 
 def main() -> None:
     # исходные данные (как в C++ main)
@@ -724,7 +734,7 @@ def main() -> None:
     r_k_2_2 = R + h_isl_2_2
     v_k_2_2 = math.sqrt(mu / r_k_2_2)
 
-    # ---------- 4 таблицы для краевых задач (P1/P2, первая/вторая высоты) ----------
+    # ---------- 4 таблицы для краевых задач ----------
 
     bound_1_1 = solve_bound(0.01, -0.001, P1, W, dt, v_k_1_1,
                             t_1_1, t_1_2, mu, R, m0, h_isl_1_1)
@@ -754,9 +764,7 @@ def main() -> None:
                                             v_k_2_2, t_1_1, t_1_2, m0)
     print_table("Таблица 4: P2, вторая высота", log_2_2)
 
-    # ---------- 2 таблицы для оптимизированного управления ----------
-    # ВНИМАНИЕ: очень долго, если оставить. Если нужно только интегрирование,
-    # этот блок можно закомментировать.
+    # ---------- 2 таблицы для оптимального управления ----------
 
     result_1 = optimization(300.0, 600.0, P1, W, dt, v_k_1_1,
                             mu, R, m0, h_isl_1_1, -0.01, -0.001)
@@ -771,6 +779,10 @@ def main() -> None:
                                               P1, dt, mu, R, beta_1,
                                               v_k_2_1, result_2.t_1, result_2.t_2, m0)
     print_table("Таблица 6: оптимальное управление, P1, вторая высота", log_opt2)
+
+    # --- При желании можно добавить чувствительности ---
+    # calculate_mass_derivatives(P1, W, dt, v_k_1_1, mu, R, m0, h_isl_1_1,
+    #                            615.0, 3450.0, 10.0, 10.0, 300.0, 600.0)
 
 
 if __name__ == "__main__":
