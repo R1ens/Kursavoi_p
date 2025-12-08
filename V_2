@@ -1,0 +1,655 @@
+они идентичны?
+
+# -*- coding: cp1251 -*-
+
+import math
+from dataclasses import dataclass
+from typing import Callable, List, Dict, Tuple
+import numpy as np
+
+# =========================================
+# Режим быстрого теста
+# =========================================
+
+FAST_TEST = True  # поставь False, чтобы вернуться к оригинальным числам
+
+# =========================================
+# Структуры данных
+# =========================================
+
+@dataclass
+class State:
+    Vx: float
+    Vy: float
+    x: float
+    y: float
+    m: float
+
+
+@dataclass
+class Derivatives:
+    dVx_dt: float
+    dVy_dt: float
+    dx_dt: float
+    dy_dt: float
+    dm_dt: float
+
+
+@dataclass
+class OptimizationRes:
+    t_1: float
+    t_2: float
+    m: float
+    tetta: float
+    d_tetta: float
+
+
+Vector2 = np.ndarray
+Matrix2 = np.ndarray
+
+M_PI_2 = math.pi / 2.0
+
+# =========================================
+# Физика: гравитация и закон тангажа
+# =========================================
+
+def calculate_gravity(mu: float, x: float, y: float, R: float) -> Tuple[float, float]:
+    sq = math.sqrt(x * x + (y + R) * (y + R))
+    gx = -mu * x / (sq ** 3)
+    gy = -mu * (y + R) / (sq ** 3)
+    return gx, gy
+
+
+def calculate_tetta(t: float,
+                    d_theta_1: float,
+                    theta_2: float,
+                    t_1: float,
+                    t_2: float,
+                    t_v: float) -> float:
+    # Полный перенос C++
+    if 0.0 <= t <= t_v:
+        return M_PI_2
+    elif t_v < t <= t_1:
+        return M_PI_2 + d_theta_1 * (t - t_v)
+    elif t >= t_2:
+        return theta_2
+    return 0.0
+
+# =========================================
+# Правая часть и Рунге–Кутта 4
+# =========================================
+
+def calculate_derivatives(P: float,
+                          theta: float,
+                          m: float,
+                          gx: float,
+                          gy: float,
+                          dt: float,
+                          cos_theta: float,
+                          sin_theta: float,
+                          beta: float,
+                          Vx: float,
+                          Vy: float,
+                          thrust_on: bool) -> Derivatives:
+    if thrust_on:
+        dVx_dt = dt * (P * cos_theta / m + gx)
+        dVy_dt = dt * (P * sin_theta / m + gy)
+        dm_dt = -dt * beta
+    else:
+        dVx_dt = dt * gx
+        dVy_dt = dt * gy
+        dm_dt = 0.0
+
+    dx_dt = dt * Vx
+    dy_dt = dt * Vy
+
+    return Derivatives(dVx_dt, dVy_dt, dx_dt, dy_dt, dm_dt)
+
+
+def runge_kutta4(t: float,
+                 dt: float,
+                 P: float,
+                 tetta: float,
+                 cos_theta: float,
+                 sin_theta: float,
+                 state: State,
+                 mu: float,
+                 R: float,
+                 beta: float,
+                 thrust_on: bool,
+                 d_theta_1: float,
+                 theta_2: float,
+                 t_1: float,
+                 t_2: float) -> State:
+
+    tetta1 = tetta
+    tetta23 = calculate_tetta(t + dt / 2.0, d_theta_1, theta_2, t_1, t_2, 14.0)
+    tetta4 = calculate_tetta(t + dt, d_theta_1, theta_2, t_1, t_2, 14.0)
+
+    gx1, gy1 = calculate_gravity(mu, state.x, state.y, R)
+    k1 = calculate_derivatives(P, tetta1, state.m,
+                               gx1, gy1, dt,
+                               math.cos(tetta1), math.sin(tetta1),
+                               beta, state.Vx, state.Vy, thrust_on)
+
+    gx2, gy2 = calculate_gravity(mu,
+                                 state.x + k1.dx_dt / 2.0,
+                                 state.y + k1.dy_dt / 2.0,
+                                 R)
+    k2 = calculate_derivatives(P, tetta23, state.m + k1.dm_dt / 2.0,
+                               gx2, gy2, dt,
+                               math.cos(tetta23), math.sin(tetta23),
+                               beta,
+                               state.Vx + k1.dVx_dt / 2.0,
+                               state.Vy + k1.dVy_dt / 2.0,
+                               thrust_on)
+
+    gx3, gy3 = calculate_gravity(mu,
+                                 state.x + k2.dx_dt / 2.0,
+                                 state.y + k2.dy_dt / 2.0,
+                                 R)
+    k3 = calculate_derivatives(P, tetta23, state.m + k2.dm_dt / 2.0,
+                               gx3, gy3, dt,
+                               math.cos(tetta23), math.sin(tetta23),
+                               beta,
+                               state.Vx + k2.dVx_dt / 2.0,
+                               state.Vy + k2.dVy_dt / 2.0,
+                               thrust_on)
+
+    gx4, gy4 = calculate_gravity(mu,
+                                 state.x + k3.dx_dt,
+                                 state.y + k3.dy_dt,
+                                 R)
+    k4 = calculate_derivatives(P, tetta4, state.m + k3.dm_dt,
+                               gx4, gy4, dt,
+                               math.cos(tetta4), math.sin(tetta4),
+                               beta,
+                               state.Vx + k3.dVx_dt,
+                               state.Vy + k3.dVy_dt,
+                               thrust_on)
+
+    state.Vx += (k1.dVx_dt + 2 * k2.dVx_dt + 2 * k3.dVx_dt + k4.dVx_dt) / 6.0
+    state.Vy += (k1.dVy_dt + 2 * k2.dVy_dt + 2 * k3.dVy_dt + k4.dVy_dt) / 6.0
+    state.x += (k1.dx_dt + 2 * k2.dx_dt + 2 * k3.dx_dt + k4.dx_dt) / 6.0
+    state.y += (k1.dy_dt + 2 * k2.dy_dt + 2 * k3.dy_dt + k4.dy_dt) / 6.0
+    state.m += (k1.dm_dt + 2 * k2.dm_dt + 2 * k3.dm_dt + k4.dm_dt) / 6.0
+
+    return state
+
+# =========================================
+# Адаптивный шаг и интегрирование
+# =========================================
+
+def calc_vel(Vx: float, Vy: float) -> float:
+    return math.hypot(Vx, Vy)
+
+
+def delta(t: float,
+          dt: float,
+          t_1: float,
+          t_2: float,
+          base_dt: float,
+          change: bool,
+          thrust_on: bool) -> Tuple[float, bool, bool]:
+    # Полный перенос логики C++
+    if (abs(t - t_1) < dt) and (not change):
+        dt = t_1 - t
+        change = True
+    elif change:
+        dt = 0.1 - dt
+        change = False
+        thrust_on = not thrust_on
+    elif (abs(t - t_2) < dt) and (not change) and (not thrust_on):
+        dt = t_2 - t
+        change = True
+    else:
+        dt = base_dt
+    return dt, change, thrust_on
+
+
+def integrate_with_log(theta_2: float,
+                       d_theta: float,
+                       P: float,
+                       dt: float,
+                       mu: float,
+                       R: float,
+                       beta: float,
+                       v_k: float,
+                       t_1: float,
+                       t_2: float,
+                       m0: float) -> Tuple[State, List[Dict[str, float]]]:
+
+    state = State(0.0, 0.0, 0.0, 0.0, m0)
+    prev_state = State(0.0, 0.0, 0.0, 0.0, m0)
+
+    N = 0
+    t = 0.0
+    v = 0.0
+    eps = 1.0e-6  # ORIGINAL: 1.0e-6 (10e-7 в тексте)
+    thrust_on = True
+    change = False
+    base_dt = 0.1   # ORIGINAL: 0.1
+
+    dt_local = dt
+
+    log: List[Dict[str, float]] = []
+
+    # чтобы не улететь в бесконечность
+    max_steps = 200000 if not FAST_TEST else 50000
+
+    # логировать не каждый шаг, а раз в log_every
+    log_every = 1 if not FAST_TEST else 10  # ORIGINAL: каждый шаг
+
+    while abs(v_k - v) > eps and N < max_steps:
+        dt_local, change, thrust_on = delta(t, dt_local, t_1, t_2, base_dt, change, thrust_on)
+        tetta = calculate_tetta(t, d_theta, theta_2, t_1, t_2, 14.0)
+        cos_theta = math.cos(tetta)
+        sin_theta = math.sin(tetta)
+
+        if N % log_every == 0:
+            log.append({
+                "N": N,
+                "t": t,
+                "m": state.m,
+                "Vx": state.Vx,
+                "Vy": state.Vy,
+                "x": state.x,
+                "y": state.y,
+                "theta_deg": tetta * 180.0 / math.pi,
+            })
+
+        prev_state = State(state.Vx, state.Vy, state.x, state.y, state.m)
+
+        state = runge_kutta4(t, dt_local, P, tetta, cos_theta, sin_theta,
+                             state, mu, R, beta, thrust_on,
+                             d_theta, theta_2, t_1, t_2)
+
+        v = calc_vel(state.Vx, state.Vy)
+
+        if v_k < abs(v):
+            state = prev_state
+            v = calc_vel(state.Vx, state.Vy)
+            base_dt = dt_local / 2.0
+        else:
+            N += 1
+            t += dt_local
+
+    # добавим последний шаг (если не попал в сетку log_every)
+    log.append({
+        "N": N,
+        "t": t,
+        "m": state.m,
+        "Vx": state.Vx,
+        "Vy": state.Vy,
+        "x": state.x,
+        "y": state.y,
+        "theta_deg": calculate_tetta(t, d_theta, theta_2, t_1, t_2, 14.0) * 180.0 / math.pi,
+    })
+
+    return state, log
+
+
+def print_table(title: str, log: List[Dict[str, float]]) -> None:
+    print("\n" + "=" * 100)
+    print(title)
+    print("=" * 100)
+    print(f"{'N':>6} {'t':>10} {'m':>10} {'Vx':>10} {'Vy':>10} {'x':>12} {'y':>12} {'theta':>10}")
+    for row in log:
+        print(f"{int(row['N']):6d} "
+              f"{row['t']:10.3f} "
+              f"{row['m']:10.3f} "
+              f"{row['Vx']:10.3f} "
+              f"{row['Vy']:10.3f} "
+              f"{row['x']:12.3f} "
+              f"{row['y']:12.3f} "
+              f"{row['theta_deg']:10.3f}")
+
+# =========================================
+# Краевая задача: Якобиан, невязки, inverseMatrix
+# =========================================
+
+def calculate_jacobian(F: Callable[[Vector2], Vector2],
+                       U: Vector2,
+                       h_d_tetta: float,
+                       h_tetta_2: float) -> Matrix2:
+    J = np.zeros((2, 2))
+    F_U = F(U)
+
+    U1 = U.copy()
+    U1[0] += h_tetta_2
+    J[:, 0] = (F(U1) - F_U) / h_tetta_2
+
+    U2 = U.copy()
+    U2[1] += h_d_tetta
+    J[:, 1] = (F(U2) - F_U) / h_d_tetta
+
+    return J
+
+
+def calculate_residuals(state: State,
+                        r_k: float,
+                        R: float) -> Vector2:
+    r = math.sqrt(state.x * state.x + (state.y + R) * (state.y + R))
+    v = math.sqrt(state.Vx * state.Vx + state.Vy * state.Vy)
+    scalar = state.x * state.Vx + (state.y + R) * state.Vy
+    tetta = math.asin(scalar / (r * v))
+    return np.array([r - r_k, tetta])
+
+
+def inverse_matrix(J: Matrix2) -> Matrix2:
+    det = np.linalg.det(J)
+    if abs(det) > 1e-12:  # ORIGINAL: если det != 0
+        return np.linalg.inv(J)
+    else:
+        print("матрица вырождена, используем псевдообратную (TEST)  # ORIGINAL: возвращали нули")
+        return np.linalg.pinv(J)  # TEST: чтобы шаг не обнулялся
+
+# =========================================
+# solve_bound: подбор theta_2 и d_tetta
+# =========================================
+
+def solve_bound(tetta_2: float,
+                d_tetta: float,
+                P: float,
+                W: float,
+                dt: float,
+                V_k: float,
+                t1: float,
+                t_2: float,
+                mu: float,
+                R: float,
+                m0: float,
+                h_isl: float) -> Vector2:
+    tol_tetta = 1e-5
+    tol_r = 1e-3
+    delta_d_tetta = 0.0001    # ORIGINAL
+    delta_tetta_2 = 0.001     # ORIGINAL
+
+    U_i = np.array([tetta_2, d_tetta], dtype=float)
+    r_diff = 1.0
+    Theta_diff = 1.0
+
+    max_iter = 10 if FAST_TEST else 30   # ORIGINAL: без явного ограничения (по сути пока не сойдётся)
+
+    iter_count = 0
+    while (abs(Theta_diff) > tol_tetta or abs(r_diff) > tol_r) and iter_count < max_iter:
+        FState, _ = integrate_with_log(U_i[0], U_i[1],
+                                       P, dt, mu, R, P / W,
+                                       V_k, t1, t_2, m0)
+        residuals = calculate_residuals(FState, R + h_isl, R)
+        r_diff = residuals[0]
+        Theta_diff = residuals[1]
+
+        def F(U: Vector2) -> Vector2:
+            st, _ = integrate_with_log(U[0], U[1],
+                                       P, dt, mu, R, P / W,
+                                       V_k, t1, t_2, m0)
+            return calculate_residuals(st, R + h_isl, R)
+
+        J = calculate_jacobian(F, U_i, delta_d_tetta, delta_tetta_2)
+        J_inv = inverse_matrix(J)
+        delta_U = J_inv @ (-residuals)
+        U_i = U_i + delta_U
+
+        # как в исходнике — названия местами
+        print(f"d_tetta = {U_i[0]}  tetta_2 = {U_i[1]}  m(tk) = {FState.m}")
+        iter_count += 1
+
+    if iter_count == max_iter:
+        print("Внимание: solve_bound не сошёлся за max_iter (TEST)")
+
+    return U_i
+
+# =========================================
+# Градиент и Гессе целевой функции
+# =========================================
+
+def calculate_grad(X: Vector2,
+                   bound_params: Vector2,
+                   P: float,
+                   dt: float,
+                   mu: float,
+                   R: float,
+                   V_k: float,
+                   delta_t1: float,
+                   delta_t2: float,
+                   W: float,
+                   h_isl: float,
+                   m0: float) -> Vector2:
+
+    def eval_shifted(dt1_shift: float, dt2_shift: float) -> float:
+        bp = solve_bound(bound_params[0], bound_params[1],
+                         P, W, dt, V_k,
+                         X[0] + dt1_shift, X[1] + dt2_shift,
+                         mu, R, 3000.0, h_isl)
+        st, _ = integrate_with_log(bp[0], bp[1],
+                                   P, dt, mu, R, P / W,
+                                   V_k, X[0] + dt1_shift, X[1] + dt2_shift, m0)
+        return -st.m
+
+    p_1 = eval_shifted(+delta_t1, 0.0)
+    m_1 = eval_shifted(-delta_t1, 0.0)
+    p_2 = eval_shifted(0.0, +delta_t2)
+    m_2 = eval_shifted(0.0, -delta_t2)
+
+    return np.array([
+        (p_1 - m_1) / (2.0 * delta_t1),
+        (p_2 - m_2) / (2.0 * delta_t2),
+    ])
+
+
+def calculate_hessian(X: Vector2,
+                      bound_params: Vector2,
+                      P: float,
+                      dt: float,
+                      mu: float,
+                      R: float,
+                      V_k: float,
+                      delta_t1: float,
+                      delta_t2: float,
+                      g: float,
+                      W: float,
+                      h_isl: float,
+                      m0: float) -> Matrix2:
+
+    def eval_shifted(dt1_shift: float, dt2_shift: float) -> float:
+        bp = solve_bound(bound_params[0], bound_params[1],
+                         P, W, dt, V_k,
+                         X[0] + dt1_shift, X[1] + dt2_shift,
+                         mu, R, m0, h_isl)
+        st, _ = integrate_with_log(bp[0], bp[1],
+                                   P, dt, mu, R, P / W,
+                                   V_k, X[0] + dt1_shift, X[1] + dt2_shift, m0)
+        return -st.m
+
+    p_1 = eval_shifted(+delta_t1, 0.0)
+    m_1 = eval_shifted(-delta_t1, 0.0)
+    p_2 = eval_shifted(0.0, +delta_t2)
+    m_2 = eval_shifted(0.0, -delta_t2)
+    p_12 = eval_shifted(+delta_t1, +delta_t2)
+
+    H = np.zeros((2, 2))
+    H[0, 0] = (p_1 - 2.0 * g + m_1) / (delta_t1 ** 2)
+    H[1, 1] = (p_2 - 2.0 * g + m_2) / (delta_t2 ** 2)
+    H[0, 1] = H[1, 0] = (p_12 - p_1 - p_2 + g) / (delta_t1 * delta_t2)
+
+    return H
+
+# =========================================
+# Optimization (Левенберг–Марквардт)
+# =========================================
+
+def optimization(t_1: float,
+                 t_2: float,
+                 P: float,
+                 W: float,
+                 dt: float,
+                 V_k: float,
+                 mu: float,
+                 R: float,
+                 m0: float,
+                 h_isl: float,
+                 tetta_2: float,
+                 d_tetta: float) -> OptimizationRes:
+
+    tol = 1e-3
+    max_iter = 20 if FAST_TEST else 100   # ORIGINAL: 100
+    alpha = 100.0
+    C1 = 0.5
+    C2 = 1.0 / C1
+    g_prev = 0.0
+
+    bound_params = np.array([tetta_2, d_tetta], dtype=float)
+    X = np.array([t_1, t_2], dtype=float)
+
+    for i in range(max_iter):
+        bound_params = solve_bound(0.01, -0.001,  # ORIGINAL: так же
+                                   P, W, dt, V_k,
+                                   X[0], X[1],
+                                   mu, R, m0, h_isl)
+
+        final_state, _ = integrate_with_log(bound_params[0], bound_params[1],
+                                            P, dt, mu, R, P / W,
+                                            V_k, X[0], X[1], m0)
+        g = -final_state.m
+
+        print(f"opt iter {i}: tetta_2 = {bound_params[0]}  d_tetta = {bound_params[1]} "
+              f"t1 = {X[0]}  t2 = {X[1]}  g = {g}")
+
+        # ORIGINAL: delta_t1 = delta_t2 = 1.0
+        delta_t1 = 5.0 if FAST_TEST else 1.0   # TEST: шаг по времени побольше, меньше вызовов
+        delta_t2 = 5.0 if FAST_TEST else 1.0
+
+        grad_g = calculate_grad(X, bound_params,
+                                P, dt, mu, R, V_k,
+                                delta_t1, delta_t2,
+                                W, h_isl, m0)
+        H_g = calculate_hessian(X, bound_params,
+                                P, dt, mu, R, V_k,
+                                delta_t1, delta_t2,
+                                g, W, h_isl, m0)
+
+        I = np.eye(2)
+        A = H_g + alpha * I
+        try:
+            step_mat = np.linalg.inv(A)
+        except np.linalg.LinAlgError:
+            step_mat = np.linalg.pinv(A)
+
+        deltaX = -(step_mat @ grad_g)
+        X = X + deltaX
+
+        if g_prev > g:
+            alpha *= C1
+            g_prev = g
+        else:
+            alpha *= C2
+            X = X - deltaX
+
+        grad_mod = np.linalg.norm(grad_g)
+        if grad_mod < tol:
+            break
+
+        if i == max_iter - 1:
+            print("Оптимизация не сошлась за макс. итераций")
+
+    return OptimizationRes(X[0], X[1], g_prev, bound_params[0], bound_params[1])
+
+# =========================================
+# Main: 6 таблиц
+# =========================================
+
+def main():
+    # исходные данные как в C++
+    m0 = 3000.0
+    m_fuel_k = 1525.0
+    m_konst = 615.0
+    t_v = 14.0
+
+    dt_orig = 0.1
+    dt = 0.2 if FAST_TEST else dt_orig  # TEST: увеличили шаг по времени
+
+    W = 3450.0
+    mu = 4903e9
+    R = 1738e3
+    P1 = 10240.0
+    P2 = 8490.0
+
+    h_isl_1_1 = 158e3
+    h_isl_2_1 = 158e3
+    h_isl_1_2 = 158e3
+    h_isl_2_2 = 195e3
+
+    t_1_1 = 350.153
+    t_1_2 = 550.531
+    t_2_1 = 350.1533
+    t_2_2 = 1000.21
+
+    beta_1 = P1 / W
+    beta_2 = P2 / W
+
+    r_k_1_1 = R + h_isl_1_1
+    v_k_1_1 = math.sqrt(mu / r_k_1_1)
+
+    r_k_2_1 = R + h_isl_2_1
+    v_k_2_1 = math.sqrt(mu / r_k_2_1)
+
+    r_k_1_2 = R + h_isl_1_2
+    v_k_1_2 = math.sqrt(mu / r_k_1_2)
+
+    r_k_2_2 = R + h_isl_2_2
+    v_k_2_2 = math.sqrt(mu / r_k_2_2)
+
+    # ---------- Таблицы 1–4: краевые задачи ----------
+
+    # Таблица 1: P1, первая высота
+    bound_1_1 = solve_bound(0.01, -0.001, P1, W, dt, v_k_1_1,
+                            t_1_1, t_1_2, mu, R, m0, h_isl_1_1)
+    state_1_1, log_1_1 = integrate_with_log(bound_1_1[0], bound_1_1[1],
+                                            P1, dt, mu, R, beta_1,
+                                            v_k_1_1, t_1_1, t_1_2, m0)
+    print_table("Таблица 1: P1, первая высота", log_1_1)
+
+    # Таблица 2: P1, вторая высота
+    bound_1_2 = solve_bound(-0.1, -0.001, P1, W, dt, v_k_2_1,
+                            t_2_1, t_2_2, mu, R, m0, h_isl_2_1)
+    state_1_2, log_1_2 = integrate_with_log(bound_1_2[0], bound_1_2[1],
+                                            P1, dt, mu, R, beta_1,
+                                            v_k_2_1, t_2_1, t_2_2, m0)
+    print_table("Таблица 2: P1, вторая высота", log_1_2)
+
+    # Таблица 3: P2, первая высота
+    bound_2_1 = solve_bound(-0.01, -0.001, P2, W, dt, v_k_1_2,
+                            t_1_1, t_1_2, mu, R, m0, h_isl_1_2)
+    state_2_1, log_2_1 = integrate_with_log(bound_2_1[0], bound_2_1[1],
+                                            P2, dt, mu, R, beta_2,
+                                            v_k_1_2, t_1_1, t_1_2, m0)
+    print_table("Таблица 3: P2, первая высота", log_2_1)
+
+    # Таблица 4: P2, вторая высота
+    bound_2_2 = solve_bound(0.01, -0.001, P2, W, dt, v_k_2_2,
+                            t_1_1, t_1_2, mu, R, m0, h_isl_2_2)
+    state_2_2, log_2_2 = integrate_with_log(bound_2_2[0], bound_2_2[1],
+                                            P2, dt, mu, R, beta_2,
+                                            v_k_2_2, t_1_1, t_1_2, m0)
+    print_table("Таблица 4: P2, вторая высота", log_2_2)
+
+    # ---------- Таблицы 5–6: оптимальное управление (как в C++ main) ----------
+
+    Result_1 = optimization(300.0, 600.0, P1, W, dt, v_k_1_1,
+                            mu, R, m0, h_isl_1_1, -0.01, -0.001)
+    state_opt1, log_opt1 = integrate_with_log(Result_1.tetta, Result_1.d_tetta,
+                                              P1, dt, mu, R, beta_1,
+                                              v_k_1_1, Result_1.t_1, Result_1.t_2, m0)
+    print_table("Таблица 5: оптимальное управление, P1, первая высота", log_opt1)
+
+    Result_2 = optimization(450.0, 1100.0, P1, W, dt, v_k_2_1,
+                            mu, R, m0, h_isl_2_1, -0.1, -0.001)
+    state_opt2, log_opt2 = integrate_with_log(Result_2.tetta, Result_2.d_tetta,
+                                              P1, dt, mu, R, beta_1,
+                                              v_k_2_1, Result_2.t_1, Result_2.t_2, m0)
+    print_table("Таблица 6: оптимальное управление, P1, вторая высота", log_opt2)
+
+
+if __name__ == "__main__":
+    main()
