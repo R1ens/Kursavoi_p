@@ -1,0 +1,852 @@
+import math
+from dataclasses import dataclass, field
+from typing import List, Tuple, Optional
+
+import numpy as np
+import matplotlib.pyplot as plt
+import xlwt
+
+
+# ==========================
+#   CONSTANTS & SETTINGS
+# ==========================
+
+@dataclass
+class MoonParams:
+    radius: float = 1_738_000.0                 # m
+    mu: float = 4.903e12                        # m^3/s^2
+    g: float = 1.623                            # m/s^2
+
+
+@dataclass
+class VehicleParams:
+    initial_mass: float = 3010.0                # Начальная масса СВ, кг
+    payload_mass: float = 895.0                 # Масса полезного груза, кг
+    structure_mass: float = 618.0               # Масса конструкции, кг
+    thrust_to_weight_ratio: float = 1.7         # n0
+    engine_specific_work: float = 3400.0        # W_ist, м/с (условно)
+
+
+@dataclass
+class OrbitParams:
+    h1: float = 95_600.0                        # м
+    h2: float = 100_800.0                       # м
+    h3: float = 110_400.0                       # м
+
+
+@dataclass
+class PitchProgramParams:
+    # Для кусочно-линейной программы (q = 1)
+    pitch_rate: float = 0.004128071370084398    # dTeta_dt
+    linear_end_time: float = 475.9766598138949  # t_1
+
+    # Для квадратичной программы (q = 2)
+    k1: float = -0.0045826897244867475
+    k2: float = 1.463626676485848e-06
+
+    engine_burn_time: float = 600.0             # tk
+    vertical_flight_time: float = 14.25         # t_v
+
+
+@dataclass
+class SimulationSettings:
+    pitch_law_type: int = 1                     # 1 — линейная, 2 — квадратичная
+    enable_logging: bool = False                # писать ли траекторию
+    stop_on_velocity_tolerance: float = 1.0     # м/с
+    target_orbit_radius: float = 0.0            # задаётся позже
+    target_orbit_velocity: float = 0.0          # задаётся позже
+
+
+@dataclass
+class TrajectoryLog:
+    x: List[float] = field(default_factory=list)
+    y: List[float] = field(default_factory=list)
+    phi: List[float] = field(default_factory=list)
+    radius_km: List[float] = field(default_factory=list)
+
+    time: List[float] = field(default_factory=list)
+    mass: List[float] = field(default_factory=list)
+    vx_kms: List[float] = field(default_factory=list)
+    vy_kms: List[float] = field(default_factory=list)
+    x_km: List[float] = field(default_factory=list)
+    y_km: List[float] = field(default_factory=list)
+    altitude_km: List[float] = field(default_factory=list)
+    speed_kms: List[float] = field(default_factory=list)
+
+    pitch_deg: List[float] = field(default_factory=list)
+    velocity_angle_deg: List[float] = field(default_factory=list)
+    attack_angle_deg: List[float] = field(default_factory=list)
+    longitude_deg: List[float] = field(default_factory=list)
+
+    gravity_losses_kms: List[float] = field(default_factory=list)
+    control_losses_kms: List[float] = field(default_factory=list)
+
+
+# ==========================
+#   CORE SIMULATION
+# ==========================
+
+def integrate_trajectory(
+    x0: float,
+    y0: float,
+    vx0: float,
+    vy0: float,
+    m0: float,
+    t0: float,
+    pitch_params: PitchProgramParams,
+    sim_settings: SimulationSettings,
+    moon: MoonParams,
+    vehicle: VehicleParams,
+    log: Optional[TrajectoryLog] = None,
+    return_mass_only: bool = False,
+):
+    """
+    Интегрирование уравнений движения методом Рунге–Кутты 4-го порядка.
+
+    Если return_mass_only = True, возвращает конечную массу аппарата.
+    Иначе возвращает (радиус, угол траектории, скорость) в конце.
+    """
+
+    # Ускорения и расход
+    thrust = vehicle.thrust_to_weight_ratio * moon.g * vehicle.initial_mass
+    mass_flow_rate = thrust / vehicle.engine_specific_work  # кг/с
+
+    # Состояние: [Vx, Vy, x, y, m]
+    state = np.array([vx0, vy0, x0, y0, m0], dtype=float)
+    # Потери: [гравитационные, управляющие]
+    losses = np.zeros(2, dtype=float)
+
+    t = float(t0)
+    tk = pitch_params.engine_burn_time
+    t_v = pitch_params.vertical_flight_time
+    pitch_type = sim_settings.pitch_law_type
+
+    def pitch_angle(t_: float, vx: float, vy: float) -> float:
+        """
+        Закон изменения угла тангажа θ(t).
+        """
+        t_round = round(t_, 8 if pitch_type == 1 else 6)
+
+        if pitch_type == 1:
+            # Кусочно-линейная программа
+            t_end = pitch_params.linear_end_time
+            if t_round > tk:
+                t_round = tk
+
+            if t_round <= t_v:
+                theta = math.pi / 2
+            elif t_v < t_round <= t_end:
+                theta_temp = math.pi / 2 - pitch_params.pitch_rate * (t_round - t_v)
+                theta = theta_temp
+            else:
+                # после t_end угол постоянен
+                theta = math.pi / 2 - pitch_params.pitch_rate * (t_end - t_v)
+        else:
+            # Квадратичная программа
+            if t_round <= t_v:
+                theta = math.pi / 2
+            else:
+                dt = t_round - t_v
+                theta = math.pi / 2 + pitch_params.k1 * dt + pitch_params.k2 * dt**2
+
+        return theta
+
+    def alpha_angle(t_: float, vx: float, vy: float) -> float:
+        """Угол атаки α = θ - θ_v."""
+        if t_ == 0:
+            return 0.0
+        theta = pitch_angle(t_, vx, vy)
+        velocity_angle = math.atan2(vy, vx)
+        return theta - velocity_angle
+
+    # Уравнения движения
+    def dVx_dt(x: float, y: float, m: float, t_: float, vx: float, vy: float) -> float:
+        r_y = y + moon.radius
+        r2 = x * x + r_y * r_y
+        r32 = r2 ** 1.5
+        theta = pitch_angle(t_, vx, vy)
+        return thrust * math.cos(theta) / m - moon.mu * x / r32
+
+    def dVy_dt(x: float, y: float, m: float, t_: float, vx: float, vy: float) -> float:
+        r_y = y + moon.radius
+        r2 = x * x + r_y * r_y
+        r32 = r2 ** 1.5
+        theta = pitch_angle(t_, vx, vy)
+        return thrust * math.sin(theta) / m - moon.mu * r_y / r32
+
+    def gravity_loss(x: float, y: float, vx: float, vy: float, t_: float) -> float:
+        if t_ == 0:
+            return 0.0
+
+        r_y = y + moon.radius
+        r2 = x * x + r_y * r_y
+        r = math.sqrt(r2)
+        r32 = r2 ** 1.5
+
+        gx = moon.mu * x / r32
+        gy = moon.mu * r_y / r32
+        g = math.sqrt(gx * gx + gy * gy)
+        v = math.sqrt(vx * vx + vy * vy)
+
+        proj = (x * vx + r_y * vy) / (r * v)
+        return g * proj
+
+    def control_loss(m: float, t_: float, vx: float, vy: float) -> float:
+        alpha = alpha_angle(t_, vx, vy)
+        return (thrust / m) * (1 - math.cos(alpha))
+
+    # ==========================
+    #   MAIN INTEGRATION LOOP
+    # ==========================
+
+    while t < tk:
+        vx, vy, x, y, m = state
+
+        # Логирование траектории
+        if sim_settings.enable_logging and log is not None:
+            r = math.sqrt(x * x + (y + moon.radius) ** 2)
+            speed = math.sqrt(vx * vx + vy * vy)
+            phi = math.atan2(y + moon.radius, x)
+
+            log.x.append(x)
+            log.y.append(y + moon.radius)
+            log.phi.append(phi)
+            log.radius_km.append(r / 1000.0)
+
+            if (
+                t % 10 == 0
+                or abs(t - tk) < 1e-8
+                or abs(t - t_v) < 1e-8
+                or (pitch_type == 1 and abs(t - pitch_params.linear_end_time) < 1e-5)
+            ):
+                log.time.append(t)
+                log.mass.append(m)
+                log.vx_kms.append(vx / 1000.0)
+                log.vy_kms.append(vy / 1000.0)
+                log.x_km.append(x / 1000.0)
+                log.y_km.append(y / 1000.0)
+                log.altitude_km.append((r - moon.radius) / 1000.0)
+                log.speed_kms.append(speed / 1000.0)
+
+                theta_deg = pitch_angle(t, vx, vy) * 180.0 / math.pi
+                velocity_angle_deg = math.degrees(math.atan2(vy, vx))
+                attack_deg = alpha_angle(t, vx, vy) * 180.0 / math.pi
+                longitude_deg = math.degrees(math.atan2(x, y + moon.radius))
+
+                log.pitch_deg.append(theta_deg)
+                log.velocity_angle_deg.append(velocity_angle_deg)
+                log.attack_angle_deg.append(attack_deg)
+                log.longitude_deg.append(longitude_deg)
+                log.gravity_losses_kms.append(losses[0] / 1000.0)
+                log.control_losses_kms.append(losses[1] / 1000.0)
+
+        # Адаптивный шаг по времени (очень грубый, как в исходном коде)
+        if pitch_type == 1:
+            if (
+                math.floor(pitch_params.linear_end_time - 1) < t
+                < round(pitch_params.linear_end_time + 1, 0)
+            ) or (
+                math.floor(t_v - 1) < t < round(t_v + 1, 0)
+            ):
+                dt = 1e-5
+            else:
+                dt = 0.1
+        else:
+            if math.floor(t - 1) < t_v < round(t + 1, 0):
+                dt = 1e-3
+            else:
+                dt = 0.1
+
+        # Уточнение шага около целевой скорости
+        speed = math.sqrt(vx * vx + vy * vy)
+        if abs(speed - sim_settings.target_orbit_velocity) < sim_settings.stop_on_velocity_tolerance:
+            dt = 1e-5
+
+        # --- Runge–Kutta 4 порядка ---
+        # Сначала ускорения
+        k1 = np.array(
+            [
+                dVx_dt(x, y, m, t, vx, vy),
+                dVy_dt(x, y, m, t, vx, vy),
+                vx,
+                vy,
+            ]
+        )
+
+        k2 = np.array(
+            [
+                dVx_dt(x + 0.5 * k1[2] * dt, y + 0.5 * k1[3] * dt, m - 0.5 * mass_flow_rate * dt, t + 0.5 * dt,
+                       vx + 0.5 * k1[0] * dt, vy + 0.5 * k1[1] * dt),
+                dVy_dt(x + 0.5 * k1[2] * dt, y + 0.5 * k1[3] * dt, m - 0.5 * mass_flow_rate * dt, t + 0.5 * dt,
+                       vx + 0.5 * k1[0] * dt, vy + 0.5 * k1[1] * dt),
+                vx + 0.5 * k1[0] * dt,
+                vy + 0.5 * k1[1] * dt,
+            ]
+        )
+
+        k3 = np.array(
+            [
+                dVx_dt(x + 0.5 * k2[2] * dt, y + 0.5 * k2[3] * dt, m - 0.5 * mass_flow_rate * dt, t + 0.5 * dt,
+                       vx + 0.5 * k2[0] * dt, vy + 0.5 * k2[1] * dt),
+                dVy_dt(x + 0.5 * k2[2] * dt, y + 0.5 * k2[3] * dt, m - 0.5 * mass_flow_rate * dt, t + 0.5 * dt,
+                       vx + 0.5 * k2[0] * dt, vy + 0.5 * k2[1] * dt),
+                vx + 0.5 * k2[0] * dt,
+                vy + 0.5 * k2[1] * dt,
+            ]
+        )
+
+        k4 = np.array(
+            [
+                dVx_dt(x + k3[2] * dt, y + k3[3] * dt, m - mass_flow_rate * dt, t + dt,
+                       vx + k3[0] * dt, vy + k3[1] * dt),
+                dVy_dt(x + k3[2] * dt, y + k3[3] * dt, m - mass_flow_rate * dt, t + dt,
+                       vx + k3[0] * dt, vy + k3[1] * dt),
+                vx + k3[0] * dt,
+                vy + k3[1] * dt,
+            ]
+        )
+
+        # Потери
+        l1 = np.array([gravity_loss(x, y, vx, vy, t), control_loss(m, t, vx, vy)])
+        l2 = np.array(
+            [
+                gravity_loss(
+                    x + 0.5 * k1[2] * dt,
+                    y + 0.5 * k1[3] * dt,
+                    vx + 0.5 * k1[0] * dt,
+                    vy + 0.5 * k1[1] * dt,
+                    t + 0.5 * dt,
+                ),
+                control_loss(
+                    m - 0.5 * mass_flow_rate * dt,
+                    t + 0.5 * dt,
+                    vx + 0.5 * k1[0] * dt,
+                    vy + 0.5 * k1[1] * dt,
+                ),
+            ]
+        )
+        l3 = np.array(
+            [
+                gravity_loss(
+                    x + 0.5 * k2[2] * dt,
+                    y + 0.5 * k2[3] * dt,
+                    vx + 0.5 * k2[0] * dt,
+                    vy + 0.5 * k2[1] * dt,
+                    t + 0.5 * dt,
+                ),
+                control_loss(
+                    m - 0.5 * mass_flow_rate * dt,
+                    t + 0.5 * dt,
+                    vx + 0.5 * k2[0] * dt,
+                    vy + 0.5 * k2[1] * dt,
+                ),
+            ]
+        )
+        l4 = np.array(
+            [
+                gravity_loss(
+                    x + k3[2] * dt,
+                    y + k3[3] * dt,
+                    vx + k3[0] * dt,
+                    vy + k3[1] * dt,
+                    t + dt,
+                ),
+                control_loss(
+                    m - mass_flow_rate * dt,
+                    t + dt,
+                    vx + k3[0] * dt,
+                    vy + k3[1] * dt,
+                ),
+            ]
+        )
+
+        losses += (dt / 6.0) * (l1 + 2 * l2 + 2 * l3 + l4)
+
+        # Обновление состояния
+        dvx_dvy_dx_dy = (dt / 6.0) * (k1 + 2 * k2 + 2 * k3 + k4)
+        dm = -mass_flow_rate * dt
+        state += np.hstack((dvx_dvy_dx_dy, [dm]))
+
+        t = round(t + dt, 6)
+
+        vx, vy, x, y, m = state
+
+        # Условия остановки
+        speed = math.sqrt(vx * vx + vy * vy)
+        if abs(speed - sim_settings.target_orbit_velocity) < 1e-3:
+            print(f"Время окончания полёта: {t:.6f} с")
+            break
+
+        if round(m - vehicle.payload_mass - vehicle.structure_mass, 2) <= 0:
+            print("Топлива не хватает!")
+            break
+
+        if round(y, 8) == 0:
+            print("Аппарат разбился!")
+            break
+
+    # Итоговые параметры
+    vx, vy, x, y, m = state
+    r_vec = math.sqrt(x * x + (y + moon.radius) ** 2)
+    v_vec = math.sqrt(vx * vx + vy * vy)
+
+    # Угол траектории (радиан)
+    sin_gamma = (x * vx + (y + moon.radius) * vy) / (r_vec * v_vec)
+    sin_gamma = max(-1.0, min(1.0, sin_gamma))
+    flight_path_angle = math.asin(round(sin_gamma, 8))
+
+    if return_mass_only:
+        return m
+    return r_vec, flight_path_angle, v_vec
+
+
+# ==========================
+#   NEWTON ITERATION
+# ==========================
+
+def newton_pitch_optimization(
+    pitch_params: PitchProgramParams,
+    sim_settings: SimulationSettings,
+    moon: MoonParams,
+    vehicle: VehicleParams,
+    initial_state: Tuple[float, float, float, float, float],
+) -> PitchProgramParams:
+    """
+    Итерационный метод Ньютона для подбора параметров программы тангажа.
+    Для q=1 изменяем (t1, dTeta_dt), для q=2 — (k1, k2).
+    """
+
+    x0, y0, vx0, vy0, m0 = initial_state
+
+    def simulate_with_params(pp: PitchProgramParams):
+        return integrate_trajectory(
+            x0, y0, vx0, vy0, m0,
+            t0=0.0,
+            pitch_params=pp,
+            sim_settings=sim_settings,
+            moon=moon,
+            vehicle=vehicle,
+            log=None,
+            return_mass_only=False,
+        )
+
+    # Начальное приближение
+    current_pp = pitch_params
+    radius, fpa, speed = simulate_with_params(current_pp)
+
+    iteration = 1
+    while (
+        round(abs(radius - sim_settings.target_orbit_radius), 4) > 0.01
+        or round(abs(math.degrees(fpa)), 6) > 1e-4
+    ):
+        radius, fpa, speed = simulate_with_params(current_pp)
+
+        print(f"Итерация {iteration}")
+        print(f"Расхождение радиусов орбит: {radius - sim_settings.target_orbit_radius:.6f} м")
+        print(f"Расхождение угла наклона траектории: {math.degrees(fpa):.6e} град.\n")
+
+        # Численные производные (якобиан)
+        dr = 1e-5
+        dtheta = 1e-7
+
+        if sim_settings.pitch_law_type == 1:
+            # dR/dt1, dR/d(dTeta_dt)
+            pp1 = PitchProgramParams(
+                pitch_rate=current_pp.pitch_rate,
+                linear_end_time=current_pp.linear_end_time + dr,
+                k1=current_pp.k1,
+                k2=current_pp.k2,
+                engine_burn_time=current_pp.engine_burn_time,
+                vertical_flight_time=current_pp.vertical_flight_time,
+            )
+            r1, fpa1, _ = simulate_with_params(pp1)
+
+            pp2 = PitchProgramParams(
+                pitch_rate=current_pp.pitch_rate + dtheta,
+                linear_end_time=current_pp.linear_end_time,
+                k1=current_pp.k1,
+                k2=current_pp.k2,
+                engine_burn_time=current_pp.engine_burn_time,
+                vertical_flight_time=current_pp.vertical_flight_time,
+            )
+            r2, fpa2, _ = simulate_with_params(pp2)
+
+            U = np.array([[current_pp.linear_end_time], [current_pp.pitch_rate]])
+        else:
+            # dR/dk1, dR/dk2
+            pp1 = PitchProgramParams(
+                pitch_rate=current_pp.pitch_rate,
+                linear_end_time=current_pp.linear_end_time,
+                k1=current_pp.k1 + dr,
+                k2=current_pp.k2,
+                engine_burn_time=current_pp.engine_burn_time,
+                vertical_flight_time=current_pp.vertical_flight_time,
+            )
+            r1, fpa1, _ = simulate_with_params(pp1)
+
+            pp2 = PitchProgramParams(
+                pitch_rate=current_pp.pitch_rate,
+                linear_end_time=current_pp.linear_end_time,
+                k1=current_pp.k1,
+                k2=current_pp.k2 + dtheta,
+                engine_burn_time=current_pp.engine_burn_time,
+                vertical_flight_time=current_pp.vertical_flight_time,
+            )
+            r2, fpa2, _ = simulate_with_params(pp2)
+
+            U = np.array([[current_pp.k1], [current_pp.k2]])
+
+        J = np.array(
+            [
+                [(r1 - radius) / dr, (r2 - radius) / dtheta],
+                [(fpa1 - fpa) / dr, (fpa2 - fpa) / dtheta],
+            ]
+        )
+
+        detJ = np.linalg.det(J)
+        if abs(detJ) < 1e-14:
+            print("Якобиан вырожден (det ~ 0), прекращаем итерации.")
+            break
+
+        J_inv = np.linalg.inv(J)
+        F = np.array([[radius - sim_settings.target_orbit_radius], [fpa]])
+
+        U_next = U - J_inv @ F
+
+        if sim_settings.pitch_law_type == 1:
+            current_pp = PitchProgramParams(
+                pitch_rate=U_next[1, 0],
+                linear_end_time=U_next[0, 0],
+                k1=current_pp.k1,
+                k2=current_pp.k2,
+                engine_burn_time=current_pp.engine_burn_time,
+                vertical_flight_time=current_pp.vertical_flight_time,
+            )
+        else:
+            current_pp = PitchProgramParams(
+                pitch_rate=current_pp.pitch_rate,
+                linear_end_time=current_pp.linear_end_time,
+                k1=U_next[0, 0],
+                k2=U_next[1, 0],
+                engine_burn_time=current_pp.engine_burn_time,
+                vertical_flight_time=current_pp.vertical_flight_time,
+            )
+
+        iteration += 1
+
+    return current_pp
+
+
+# ==========================
+#   MASS SENSITIVITY
+# ==========================
+
+def d_payload_mass_d_initial_mass(
+    moon: MoonParams,
+    vehicle: VehicleParams,
+    pitch_params: PitchProgramParams,
+    sim_settings: SimulationSettings,
+    delta_m: float = 30.0,
+) -> float:
+    """Производная m_конечной по общей стартовой массе (приближённо)."""
+    x0 = y0 = vx0 = vy0 = t0 = 0.0
+    m0 = vehicle.initial_mass
+
+    m1 = integrate_trajectory(
+        x0, y0, vx0, vy0, m0,
+        t0,
+        pitch_params,
+        sim_settings,
+        moon,
+        vehicle,
+        log=None,
+        return_mass_only=True,
+    )
+    m2 = integrate_trajectory(
+        x0, y0, vx0, vy0, m0 + delta_m,
+        t0,
+        pitch_params,
+        sim_settings,
+        moon,
+        vehicle,
+        log=None,
+        return_mass_only=True,
+    )
+    return (m2 - m1) / delta_m
+
+
+def d_payload_mass_d_structure_mass(
+    moon: MoonParams,
+    vehicle: VehicleParams,
+    pitch_params: PitchProgramParams,
+    sim_settings: SimulationSettings,
+    delta_m: float = 30.0,
+) -> float:
+    """Производная m_конечной по массе конструкции (приближённо)."""
+    x0 = y0 = vx0 = vy0 = t0 = 0.0
+
+    # изменяем массу конструкции: эквивалентно изменению стартовой массы
+    m0 = vehicle.initial_mass
+    m1 = integrate_trajectory(
+        x0, y0, vx0, vy0, m0,
+        t0,
+        pitch_params,
+        sim_settings,
+        moon,
+        vehicle,
+        log=None,
+        return_mass_only=True,
+    )
+
+    vehicle2 = VehicleParams(
+        initial_mass=vehicle.initial_mass + delta_m,
+        payload_mass=vehicle.payload_mass,
+        structure_mass=vehicle.structure_mass + delta_m,
+        thrust_to_weight_ratio=vehicle.thrust_to_weight_ratio,
+        engine_specific_work=vehicle.engine_specific_work,
+    )
+
+    m2 = integrate_trajectory(
+        x0, y0, vx0, vy0, vehicle2.initial_mass,
+        t0,
+        pitch_params,
+        sim_settings,
+        moon,
+        vehicle2,
+        log=None,
+        return_mass_only=True,
+    )
+
+    return (m2 - m1 - delta_m) / delta_m
+
+
+def d_payload_mass_d_engine_work(
+    moon: MoonParams,
+    vehicle: VehicleParams,
+    pitch_params: PitchProgramParams,
+    sim_settings: SimulationSettings,
+    delta_w: float = 10.0,
+) -> float:
+    """Производная m_конечной по энергетическим характеристикам двигателя W_ist."""
+    x0 = y0 = vx0 = vy0 = t0 = 0.0
+    m0 = vehicle.initial_mass
+
+    m1 = integrate_trajectory(
+        x0, y0, vx0, vy0, m0,
+        t0,
+        pitch_params,
+        sim_settings,
+        moon,
+        vehicle,
+        log=None,
+        return_mass_only=True,
+    )
+
+    vehicle2 = VehicleParams(
+        initial_mass=vehicle.initial_mass,
+        payload_mass=vehicle.payload_mass,
+        structure_mass=vehicle.structure_mass,
+        thrust_to_weight_ratio=vehicle.thrust_to_weight_ratio,
+        engine_specific_work=vehicle.engine_specific_work + delta_w,
+    )
+
+    m2 = integrate_trajectory(
+        x0, y0, vx0, vy0, m0,
+        t0,
+        pitch_params,
+        sim_settings,
+        moon,
+        vehicle2,
+        log=None,
+        return_mass_only=True,
+    )
+
+    return (m2 - m1) / delta_w
+
+
+# ==========================
+#   OUTPUT (PLOT + EXCEL)
+# ==========================
+
+def plot_trajectory(
+    log: TrajectoryLog,
+    sim_settings: SimulationSettings,
+    moon: MoonParams,
+    filename: str = "trajectory.png",
+) -> None:
+    """Полярный график траектории выведения."""
+    theta = np.linspace(0, 2 * math.pi, 360)
+
+    radial_ticks = np.linspace(
+        moon.radius / 1000.0,
+        (sim_settings.target_orbit_radius + 20_000.0) / 1000.0,
+        10,
+    )
+
+    fig = plt.figure(figsize=(20, 10))
+    ax = fig.add_subplot(111, projection="polar")
+    ax.set_rlim(moon.radius * 0.99 / 1000.0, sim_settings.target_orbit_radius * 1.01 / 1000.0)
+
+    ax.plot(log.phi, log.radius_km, "--", linewidth=1, label="Траектория выведения")
+    ax.plot(theta, np.ones_like(theta) * moon.radius / 1000.0, label="Луна")
+    ax.plot(theta, np.ones_like(theta) * sim_settings.target_orbit_radius / 1000.0, "--", linewidth=1,
+            label="Целевая орбита")
+
+    ax.set_rlabel_position(90)
+    ax.set_rgrids(radial_ticks, fmt="%d", horizontalalignment="right", fontsize=6)
+    ax.set_title("R, км", pad=-35, fontsize=8)
+    plt.legend(fontsize=8)
+
+    fig.savefig(filename, dpi=600)
+    plt.show()
+
+
+def save_results_to_excel(log: TrajectoryLog, filepath: str) -> None:
+    """Сохранение результатов моделирования в Excel (формат .xls)."""
+    wb = xlwt.Workbook()
+    ws = wb.add_sheet("Расчёт", cell_overwrite_ok=True)
+
+    headers = [
+        "t",
+        "m",
+        "Vx",
+        "Vy",
+        "x",
+        "y",
+        "h",
+        "V",
+        "Tangaj",
+        "TetaC",
+        "alfa",
+        "fi",
+        "Grav_poteri",
+        "Upr_poteri",
+    ]
+
+    # Заголовки
+    for col, name in enumerate(headers):
+        ws.write(0, col, name)
+
+    # Данные
+    for i in range(len(log.time)):
+        ws.write(i + 1, 0, log.time[i])
+        ws.write(i + 1, 1, log.mass[i])
+        ws.write(i + 1, 2, log.vx_kms[i])
+        ws.write(i + 1, 3, log.vy_kms[i])
+        ws.write(i + 1, 4, log.x_km[i])
+        ws.write(i + 1, 5, log.y_km[i])
+        ws.write(i + 1, 6, log.altitude_km[i])
+        ws.write(i + 1, 7, log.speed_kms[i])
+        ws.write(i + 1, 8, log.pitch_deg[i])
+        ws.write(i + 1, 9, log.velocity_angle_deg[i])
+        ws.write(i + 1, 10, log.attack_angle_deg[i])
+        ws.write(i + 1, 11, log.longitude_deg[i])
+        ws.write(i + 1, 12, log.gravity_losses_kms[i])
+        ws.write(i + 1, 13, log.control_losses_kms[i])
+
+    wb.save(filepath)
+    print(f"Результаты сохранены в файл: {filepath}")
+
+
+# ==========================
+#   MAIN
+# ==========================
+
+def main() -> None:
+    moon = MoonParams()
+    vehicle = VehicleParams()
+    orbits = OrbitParams()
+    pitch_params = PitchProgramParams()
+
+    # Радиусы орбит
+    r1 = moon.radius + orbits.h1
+    r2 = moon.radius + orbits.h2
+    r3 = moon.radius + orbits.h3
+
+    v1 = math.sqrt(moon.mu / r1)
+    v2 = math.sqrt(moon.mu / r2)
+    v3 = math.sqrt(moon.mu / r3)
+
+    print("Граничные условия:")
+    print(f"Радиус 1 исследуемой орбиты: {r1:.3f} м")
+    print(f"Радиус 2 исследуемой орбиты: {r2:.3f} м")
+    print(f"Радиус 3 исследуемой орбиты: {r3:.3f} м")
+    print(f"Скорость 1 исследуемой орбиты: {v1:.6f} м/с")
+    print(f"Скорость 2 исследуемой орбиты: {v2:.6f} м/с")
+    print(f"Скорость 3 исследуемой орбиты: {v3:.6f} м/с")
+    print(f"Масса топлива: {vehicle.initial_mass - vehicle.payload_mass - vehicle.structure_mass:.3f} кг\n")
+
+    sim_settings = SimulationSettings()
+    sim_settings.target_orbit_radius = r1
+    sim_settings.target_orbit_velocity = v1
+
+    # Выбор закона изменения угла тангажа
+    while True:
+        try:
+            q = int(input("Выберите закон изменения угла тангажа (1 — линейный, 2 — квадратичный): "))
+            if q in (1, 2):
+                sim_settings.pitch_law_type = q
+                break
+        except ValueError:
+            pass
+        print("Некорректный ввод, попробуйте ещё раз.")
+
+    # Итерационный подбор параметров программы тангажа
+    initial_state = (0.0, 0.0, 0.0, 0.0, vehicle.initial_mass)
+    pitch_params = newton_pitch_optimization(
+        pitch_params,
+        sim_settings,
+        moon,
+        vehicle,
+        initial_state,
+    )
+
+    # Финальный прогон с логированием
+    sim_settings.enable_logging = True
+    trajectory_log = TrajectoryLog()
+    radius, fpa, speed = integrate_trajectory(
+        x0=0.0,
+        y0=0.0,
+        vx0=0.0,
+        vy0=0.0,
+        m0=vehicle.initial_mass,
+        t0=0.0,
+        pitch_params=pitch_params,
+        sim_settings=sim_settings,
+        moon=moon,
+        vehicle=vehicle,
+        log=trajectory_log,
+        return_mass_only=False,
+    )
+
+    # Чувствительности по массе
+    dmdm0 = d_payload_mass_d_initial_mass(moon, vehicle, pitch_params, sim_settings)
+    dmdm_struct = d_payload_mass_d_structure_mass(moon, vehicle, pitch_params, sim_settings)
+    dmdW = d_payload_mass_d_engine_work(moon, vehicle, pitch_params, sim_settings)
+
+    print("\nПроизводные:")
+    print(f"dm_pg / dm_запр ≈ {dmdm0:.6f}")
+    print(f"dm_pg / dm_constr ≈ {dmdm_struct:.6f}")
+    print(f"dm_pg / dW_ist ≈ {dmdW:.6f}\n")
+
+    print(f"Расхождение радиус-векторов орбит ИСЛ: {radius - sim_settings.target_orbit_radius:.6f} м")
+    print(f"Расхождение угла наклона траектории ИСЛ: {math.degrees(fpa):.6e} град.")
+    print(f"Расхождение скоростей орбит ИСЛ: {speed - sim_settings.target_orbit_velocity:.6f} м/с\n")
+
+    if sim_settings.pitch_law_type == 1:
+        print(f"Итоговая угловая скорость СВ dθ/dt: {pitch_params.pitch_rate:.9f} рад/с")
+        print(f"Время окончания линейной программы тангажа t1: {pitch_params.linear_end_time:.6f} с\n")
+    else:
+        print(f"1-й коэффициент в квадратичной программе тангажа k1: {pitch_params.k1:.9f} рад/с")
+        print(f"2-й коэффициент в квадратичной программе тангажа k2: {pitch_params.k2:.9e} рад/с^2\n")
+
+    # График и Excel
+    plot_trajectory(trajectory_log, sim_settings, moon, filename="trajectory.png")
+    # тут можешь поменять путь на свой
+    save_results_to_excel(trajectory_log, filepath="Расчёт_траектории.xls")
+
+    print("Успешно.")
+
+
+if __name__ == "__main__":
+    main()
