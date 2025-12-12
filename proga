@@ -889,6 +889,30 @@ int main() {
         // При необходимости: суммарная продольная составляющая трения (57)
         const double Xtr = (Ftr1 + Ftr2 + Ftr3 + Ftr4) * cos(beta);
         cout << "\n\nXтр = " << Xtr;
+
+        // Поправка на трение и суммарные коэффициенты (58)–(61)
+        // Cfср_сум = Xтр / (q∞ · b · 1), размах принят единичным.
+        // В расчётной части программы геометрия (b) задаётся в мм, и далее по методичке
+        // используется то же b без пересчёта в метры (как в примере расчёта).
+        const double Cf_sum = Xtr / (q_8 * b);
+
+        const double Cx_sum  = C_x + Cf_sum;
+        const double Cxa_sum = C_y * sin(alfa) + Cx_sum * cos(alfa);
+        const double Cya_sum = C_y * cos(alfa) - Cx_sum * sin(alfa);
+        const double K_sum   = Cya_sum / Cxa_sum;
+
+        cout << "\n\nПоправка на трение (58):";
+        cout << "\nCfср_сум = " << Cf_sum;
+        cout << "\nCfср_сум *10^-6 = " << (Cf_sum * 1e6);
+
+        cout << "\n\nСуммарные коэффициенты с учетом трения (59)–(61):";
+        cout << "\nCxсум = " << Cx_sum;
+        cout << "\nCxсум *10^-3 = " << (Cx_sum * 1e3);
+        cout << "\nCxа_сум = " << Cxa_sum;
+        cout << "\nCxа_сум *10^-3 = " << (Cxa_sum * 1e3);
+        cout << "\nCyа_сум = " << Cya_sum;
+        cout << "\nCyа_сум *10^-3 = " << (Cya_sum * 1e3);
+        cout << "\nK = " << K_sum;
     }
 
 
