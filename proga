@@ -1,0 +1,568 @@
+#define _USE_MATH_DEFINES
+#include <iostream>
+#include <cmath>
+#include <string>
+#include <iomanip>
+#include <vector>
+
+using namespace std;
+
+// -------------------- Атмосфера --------------------
+void atmosphere(double h, double& H, double& g, double& d, double& p, double& T, double& a,
+                double& r, double& R, double& g0, double& T0, double& H0, double& p0)
+{
+    double b;
+    R = 287.053;
+    r = 6356767;
+    g0 = 9.80665;
+
+    H = (r * h) / (r + h);
+    g = g0 * pow((r / (r + h)), 2);
+
+    if ((h >= -1999) && (h < 0)) { b = -0.0065; T0 = 301.15; H0 = -2000; p0 = 127774; }
+    else if ((h >= 0) && (h < 11019)) { b = -0.0065; T0 = 288.15; H0 = 0; p0 = 101325; }
+    else if ((h >= 11019) && (h < 20063)) { b = 0; T0 = 216.65; H0 = 11000; p0 = 22632; }
+    else if ((h >= 20063) && (h < 32162)) { b = 0.0010; T0 = 216.65; H0 = 20000; p0 = 5474.87; }
+    else if ((h >= 32162) && (h < 47350)) { b = 0.0028; T0 = 228.65; H0 = 32000; p0 = 868.014; }
+    else if ((h >= 47350) && (h < 51412)) { b = 0; T0 = 270.65; H0 = 47000; p0 = 110.906; }
+    else if ((h >= 51412) && (h < 71802)) { b = -0.0028; T0 = 270.65; H0 = 51000; p0 = 66.9384; }
+    else if ((h >= 71802) && (h < 86152)) { b = -0.0020; T0 = 214.65; H0 = 71000; p0 = 3.95639; }
+    else if ((h >= 86152) && (h < 95411)) { b = 0.0000; T0 = 186.65; H0 = 85000; p0 = 0.445710; }
+    else { cout << "h out of range\n"; exit(0); }
+
+    T = T0 + b * (H - H0);
+
+    if (b == 0) {
+        p = pow(10, (log10(p0) + ((-0.434294 / (R * T)) * g0 * (H - H0))));
+    } else {
+        p = pow(10, (log10(p0) - ((g0 * log10((T0 + b * (H - H0)) / T0)) / (b * R))));
+    }
+
+    d = p / (R * T);
+    a = 20.046796 * sqrt(T);
+}
+
+// -------------------- Газовая динамика --------------------
+double FindThetta(double beta, double k, double M)
+{
+    // Решение кубического уравнения для присоединенного скачка
+    double a1 = tan(beta) * ((k - 1) / 2 * M * M + 1);
+    double b1 = 1 - M * M;
+    double c1 = tan(beta) * (1 + (k + 1) / 2 * M * M);
+    double d1 = 1.0;
+
+    double a = b1 / a1;
+    double b = c1 / a1;
+    double c = d1 / a1;
+
+    double p = -a * a / 3 + b;
+    double q = 2 * pow((a / 3), 3) - (a * b) / 3 + c;
+    double Q = pow(p / 3, 3) + pow(q / 2, 2);
+
+    double x = 0.0, alfa = 0.0;
+
+    if (Q > 0) return 0.0; // присоединенного скачка нет
+    if (Q < 0) {
+        alfa = acos(q / (2 * pow(-p / 3, 1.5)));
+        x = 2 * pow(-p / 3, 0.5) * cos(alfa / 3 + M_PI / 3) - a / 3;
+        return atan(x);
+    }
+    // Q == 0
+    x = cbrt(-q / 2.0) - a / 3.0;
+    return atan(x);
+}
+
+double FindW(double k, double M)
+{
+    return sqrt((k + 1) / (k - 1)) * atan(sqrt(((k - 1) / (k + 1)) * ((M * M) - 1)))
+        - atan(sqrt((M * M) - 1));
+}
+
+void ParamTorm(double& p0, double& ro0, double& T0,
+               double p, double ro, double T, double k, double M)
+{
+    p0  = p  * pow((1 + (k - 1) / 2 * M * M), k / (k - 1));
+    ro0 = ro * pow((1 + (k - 1) / 2 * M * M), 1 / (k - 1));
+    T0  = T  * (1 + (k - 1) / 2 * M * M);
+}
+
+void Gr12(double& M, double& p, double& ro, double& T, double& v, double& mu,
+          double p_in, double k, double M_in, double thetta, double ro_in, double T_in, double v_in, double beta)
+{
+    M = sqrt((((2 + (k - 1) * M_in * M_in) /
+              (2 * k * M_in * M_in * pow(sin(thetta), 2) - (k - 1))) +
+              ((2 * M_in * M_in * pow(cos(thetta), 2)) /
+              (2 + (k - 1) * M_in * M_in * pow(sin(thetta), 2)))));
+
+    p  = p_in * (2 * k / (k + 1) * M_in * M_in * pow(sin(thetta), 2) - (k - 1) / (k + 1));
+    ro = ro_in * ((0.5 * (k + 1) * M_in * M_in * pow(sin(thetta), 2)) /
+                 (1 + 0.5 * (k - 1) * M_in * M_in * pow(sin(thetta), 2)));
+    T  = T_in * p / p_in * ro_in / ro;
+    v  = v_in * cos(thetta - beta) / cos(thetta);
+    mu = asin(1 / M);
+}
+
+void Gr34(double& M, double& p, double& ro, double& T, double& a, double& v, double& mu,
+          double w_target, double k, double p0, double ro0, double T0)
+{
+    // подбираем M по функции Прандтля—Майера
+    double w = 0.0;
+    M = max(1.0, M);
+
+    do {
+        M += 0.0001;
+        w = FindW(k, M);
+    } while (fabs(w - w_target) > 1e-5);
+
+    p  = p0  * pow((1 + ((k - 1) / 2) * M * M), -k / (k - 1));
+    ro = ro0 * pow((1 + ((k - 1) / 2) * M * M), -1 / (k - 1));
+    T  = T0  * pow((1 + ((k - 1) / 2) * M * M), -1);
+    a  = sqrt(k * p / ro);
+    v  = M * a;
+    mu = asin(1 / M);
+}
+
+// -------------------- Теплофизика --------------------
+void FindCpMLbd(double T, double& cp, double& mu, double& lbd)
+{
+    const double cp_const  = 1004.7;
+    const double mu_const  = 1.79e-5;
+    const double lbd_const = 0.0232;
+    const double fi = 0.1, n = 0.76, dz = 0.85;
+    const double T1 = 288.15, T2 = 261.0;
+
+    cp  = cp_const  * pow(T / T1, fi);
+    mu  = mu_const  * pow(T / T1, n);
+    lbd = lbd_const * pow(T / T2, dz);
+}
+
+// Температура восстановления и определяющая (Эккерт)
+void Tr_T_opr(double& Tr, double& T_opr, double lt, double T, double M, double k, double T_st)
+{
+    double Trab, st, r, cp, mu, lbd, Pr;
+
+    T_opr = 0.5 * (T + T_st);
+    Trab = T_opr;
+
+    FindCpMLbd(Trab, cp, mu, lbd);
+    Pr = cp * mu / lbd;
+
+    st = (lt == 1) ? 0.5 : (1.0 / 3.0);
+    r  = pow(Pr, st);
+
+    Tr = T * (1 + r * (k - 1) * 0.5 * M * M);
+    T_opr = 0.5 * (T_st + T) + 0.22 * (Tr - T);
+
+    if (fabs((T_opr - Trab) / T_opr) > 0.001) {
+        Trab = T_opr;
+        FindCpMLbd(Trab, cp, mu, lbd);
+        Pr = cp * mu / lbd;
+        r  = pow(Pr, st);
+        Tr = T * (1 + r * (k - 1) * 0.5 * M * M);
+        T_opr = 0.5 * (T_st + T) + 0.22 * (Tr - T);
+    }
+}
+
+// Уточнение Re_кр (аппроксимация графика)
+void Rekr(double& Re, double T_st, double Tr, double M, double Re_kr)
+{
+    double Tst_otn = T_st / Tr;
+    double x = (Tst_otn - 1) / (M * M);
+    double y = 1 - 16 * x - 412.5 * x * x - 35000 * pow(x, 3) - 375000 * pow(x, 4);
+    Re = Re_kr * y;
+}
+
+// -------------------- Пункт 8: Пограничный слой --------------------
+// Несжимаемый ламинарный
+void LamNes(double& Re, double& dlt, double& tau, double& cfx, double& cf,
+            double& dlt_star, double& dlt_star_sqr,
+            double V, double rho, double x, double mu)
+{
+    Re = (V * rho * x) / mu;
+    dlt = (4.64 * x) / sqrt(Re);
+    tau = (0.323 * rho * V * V) / sqrt(Re);
+    cfx = 0.646 / sqrt(Re);
+    cf  = 1.292 / sqrt(Re);
+    dlt_star     = 1.74  * x / sqrt(Re);
+    dlt_star_sqr = 0.646 * x / sqrt(Re);
+}
+
+// Сжимаемый ламинарный (по определяющей температуре)
+void LamS(double& DLT, double& Tau, double& CFX, double& Cf,
+          double& Dlt_star, double& Dlt_star_sqr,
+          double dlt, double tau, double cfx, double cf,
+          double dlt_star, double dlt_star_sqr,
+          double Tstar, double Tedge, double n)
+{
+    DLT = dlt * pow((Tstar / Tedge), (0.5 * (n + 1)));
+    Tau = tau * pow((Tstar / Tedge), (0.5 * (n - 1)));
+    CFX = cfx * pow((Tstar / Tedge), (0.5 * (n - 1)));
+    Cf  = cf  * pow((Tstar / Tedge), (0.5 * (n - 1)));
+    Dlt_star     = dlt_star * DLT / dlt;
+    Dlt_star_sqr = dlt_star_sqr * CFX / cfx;
+}
+
+// Несжимаемый турбулентный
+void TurNes(double& Re, double& dlt, double& tau, double& cfx, double& cf,
+            double& dlt_star, double& dlt_star_sqr,
+            double V, double rho, double x, double mu)
+{
+    Re = (V * rho * x) / mu;
+    dlt = (0.37 * x) / pow(Re, 0.2);
+    tau = (0.0289 * rho * V * V) / pow(Re, 0.2);
+    cfx = 0.0578 / pow(Re, 0.2);
+    cf  = 0.074  / pow(Re, 0.2);
+    double k_ = 7.0;
+    dlt_star     = dlt / (k_ + 1);
+    dlt_star_sqr = (dlt * k_) / ((k_ + 1) * (k_ + 2));
+}
+
+// Сжимаемый турбулентный
+void TurS(double& DLT, double& TAU, double& CfX, double& Cf,
+          double& Dlt_star, double& Dlt_star_sqr,
+          double dlt, double tau, double cfx, double cf,
+          double dlt_star, double dlt_star_sqr,
+          double Tstar, double Tedge, double n)
+{
+    DLT = dlt * pow((Tstar / Tedge), (0.2 * (n + 1)));
+    TAU = tau * pow((Tstar / Tedge), (0.2 * (n - 4)));
+    CfX = cfx * pow((Tstar / Tedge), (0.2 * (n - 4)));
+    Cf  = cf  * pow((Tstar / Tedge), (0.2 * (n - 4)));
+    Dlt_star     = dlt_star * DLT / dlt;
+    Dlt_star_sqr = dlt_star_sqr * CfX / cfx;
+}
+
+// Δx из условия δл = δт в критическом сечении (см. п.7–8 методички)
+double CalcDeltaX(double delta_l_comp, double V, double rho, double mu,
+                  double Tstar_turb, double Tedge, double n)
+{
+    double ratio = Tstar_turb / Tedge;
+    double A = 0.37 * pow(mu / (V * rho), 0.2) * pow(ratio, 0.2 * (n + 1));
+    // delta = A * x^(0.8)  => x = (delta/A)^(1/0.8) = (delta/A)^(1.25)
+    return pow(delta_l_comp / A, 1.25);
+}
+
+// xf0 по известной δ (для “фиктивной пластины” на гранях 3–4)
+double CalcXfromDeltaTurb(double delta_comp, double V, double rho, double mu,
+                          double Tstar_turb, double Tedge, double n)
+{
+    double ratio = Tstar_turb / Tedge;
+    double A = 0.37 * pow(mu / (V * rho), 0.2) * pow(ratio, 0.2 * (n + 1));
+    return pow(delta_comp / A, 1.25);
+}
+
+struct BLRow {
+    int face;
+    int point;
+    double x;
+    double xf;
+    double delta_ns, Re, tau_ns, cfx_ns, cf_ns, dstar_ns, dss_ns;
+    double delta,    tau,    cfx,    cf,    dstar,    dss;
+};
+
+void PrintBLTable(const vector<BLRow>& rows)
+{
+    cout << "\n\n================ Пункт 8: Параметры смешанного ПС (таблица) ================\n";
+    cout << fixed << setprecision(3);
+
+    cout << "face pt |   x    |   xf   |  d_ns(mm) | Re(1e6) | tau_ns | cfx_ns | cf_ns | d*_ns(mm) | d**_ns(mm)"
+         << " ||   d(mm)  |  tau   |  cfx  |  cf   |  d*(mm) | d**(mm)\n";
+    cout << "-----------------------------------------------------------------------------------------------------------"
+         << "--------------------------------------\n";
+
+    for (const auto& r : rows) {
+        cout << setw(4) << r.face << setw(3) << r.point << " | "
+             << setw(6) << r.x << " | "
+             << setw(6) << r.xf << " | "
+             << setw(9) << (r.delta_ns * 1e3) << " | "
+             << setw(7) << (r.Re / 1e6) << " | "
+             << setw(6) << r.tau_ns << " | "
+             << setw(6) << (r.cfx_ns * 1e3) << " | "
+             << setw(5) << (r.cf_ns  * 1e3) << " | "
+             << setw(9) << (r.dstar_ns * 1e3) << " | "
+             << setw(10) << (r.dss_ns * 1e3)
+             << " || "
+             << setw(7) << (r.delta * 1e3) << " | "
+             << setw(6) << r.tau << " | "
+             << setw(5) << (r.cfx * 1e3) << " | "
+             << setw(5) << (r.cf  * 1e3) << " | "
+             << setw(8) << (r.dstar * 1e3) << " | "
+             << setw(7) << (r.dss   * 1e3)
+             << "\n";
+    }
+}
+
+// -------------------- Коэф. давления (из твоего кода) --------------------
+void Koefp(double& p_, double p, double p_8, double q) { p_ = (p - p_8) / q; }
+
+// -------------------- main --------------------
+int main()
+{
+    setlocale(LC_ALL, "RU");
+
+    // ИД (как в методичке для N=16)
+    int N = 16;
+    double c = 100;   // мм
+    double b = 1200;  // мм
+    double h = (10 + 0.4 * N) * 1000;  // м
+    double M = 4.5 + 0.1 * N;
+    double alfa_deg = 2 + 0.1 * N;
+    cout << "ИД\nM = " << M << "\nalfa = " << alfa_deg << endl;
+
+    double alfa = alfa_deg * M_PI / 180.0;
+    double T_ct = 370;
+    double Re_kp = 5000000;
+    double k = 1.4;
+    const double n_visc = 0.76; // n из степенных законов (см. методичку)
+
+    // Атмосфера
+    double H, g, ro_8, p_8, T_8, a_8, r, R, g0, T0_8, H0, p0_8;
+    if (h < -1999 || h >= 95411) { cout << "h out of range\n"; return 0; }
+    atmosphere(h, H, g, ro_8, p_8, T_8, a_8, r, R, g0, T0_8, H0, p0_8);
+
+    cout << "\nАтмосфера\n"
+         << "h = " << h << "\nH = " << H << "\np = " << p_8
+         << "\nro = " << ro_8 << "\ng = " << g << "\na = " << a_8 << "\nT = " << T_8 << "\n";
+
+    // Геометрия
+    double beta = atan(c / b);  // рад
+    double v_8 = M * a_8;
+
+    // Набегающий поток (торможение)
+    double p0, ro0, T0;
+    ParamTorm(p0, ro0, T0, p_8, ro_8, T_8, k, M);
+    cout << "\nПараметры набегающего потока :\n"
+         << "v_8 = " << v_8 << "\np0_8 = " << p0 << "\nro0 = " << ro0 << "\nT0 = " << T0 << "\n";
+
+    // ---- Грань 1 ----
+    double beta_1 = beta - alfa;
+    double thetta_1 = FindThetta(beta_1, k, M);
+    cout << "\nГрань 1\nthetta_1(grad) = " << thetta_1 * 180.0 / M_PI;
+
+    double M_1, p_1, ro_1, T_1, v_1, muM_1;
+    Gr12(M_1, p_1, ro_1, T_1, v_1, muM_1, p_8, k, M, thetta_1, ro_8, T_8, v_8, beta_1);
+    cout << "\nM_1 = " << M_1 << "\np_1 = " << p_1 << "\nro_1 = " << ro_1 << "\nT_1 = " << T_1
+         << "\nv_1 = " << v_1 << "\nmu_1 = " << muM_1 * 180.0 / M_PI << "\n";
+
+    double p0_1, ro0_1, T0_1;
+    ParamTorm(p0_1, ro0_1, T0_1, p_1, ro_1, T_1, k, M_1);
+
+    double cp_1, mu_1, lbd_1;
+    FindCpMLbd(T_1, cp_1, mu_1, lbd_1);
+
+    // ---- Грань 2 ----
+    double beta_2 = beta + alfa;
+    double thetta_2 = FindThetta(beta_2, k, M);
+    cout << "\nГрань 2\nthetta_2(grad) = " << thetta_2 * 180.0 / M_PI;
+
+    double M_2, p_2, ro_2, T_2, v_2, muM_2;
+    Gr12(M_2, p_2, ro_2, T_2, v_2, muM_2, p_8, k, M, thetta_2, ro_8, T_8, v_8, beta_2);
+    cout << "\nM_2 = " << M_2 << "\np_2 = " << p_2 << "\nro_2 = " << ro_2 << "\nT_2 = " << T_2
+         << "\nv_2 = " << v_2 << "\nmu_2 = " << muM_2 * 180.0 / M_PI << "\n";
+
+    double p0_2, ro0_2, T0_2;
+    ParamTorm(p0_2, ro0_2, T0_2, p_2, ro_2, T_2, k, M_2);
+
+    double cp_2, mu_2, lbd_2;
+    FindCpMLbd(T_2, cp_2, mu_2, lbd_2);
+
+    // ---- Грань 3 ----
+    double w1 = FindW(k, M_1);
+    double w3_target = w1 + 2 * beta;
+
+    double M_3 = 1.0, p_3, ro_3, T_3, a_3, v_3, muM_3;
+    Gr34(M_3, p_3, ro_3, T_3, a_3, v_3, muM_3, w3_target, k, p0_1, ro0_1, T0_1);
+
+    double cp_3, mu_3, lbd_3;
+    FindCpMLbd(T_3, cp_3, mu_3, lbd_3);
+
+    // ---- Грань 4 ----
+    double w2 = FindW(k, M_2);
+    double w4_target = w2 + 2 * beta;
+
+    double M_4 = 1.0, p_4, ro_4, T_4, a_4, v_4, muM_4;
+    Gr34(M_4, p_4, ro_4, T_4, a_4, v_4, muM_4, w4_target, k, p0_2, ro0_2, T0_2);
+
+    double cp_4, mu_4, lbd_4;
+    FindCpMLbd(T_4, cp_4, mu_4, lbd_4);
+
+    // ---- Температуры восстановления и определяющие ----
+    double Trl_1, Toprl_1, Trl_2, Toprl_2;
+    double Trt_1, Toprt_1, Trt_2, Toprt_2, Trt_3, Toprt_3, Trt_4, Toprt_4;
+
+    Tr_T_opr(Trl_1, Toprl_1, 1, T_1, M_1, k, T_ct);
+    Tr_T_opr(Trl_2, Toprl_2, 1, T_2, M_2, k, T_ct);
+
+    Tr_T_opr(Trt_1, Toprt_1, 0, T_1, M_1, k, T_ct);
+    Tr_T_opr(Trt_2, Toprt_2, 0, T_2, M_2, k, T_ct);
+    Tr_T_opr(Trt_3, Toprt_3, 0, T_3, M_3, k, T_ct);
+    Tr_T_opr(Trt_4, Toprt_4, 0, T_4, M_4, k, T_ct);
+
+    // ---- Уточнение Reкр и xкр ----
+    double Re_kr1, Re_kr2;
+    Rekr(Re_kr1, T_ct, Trl_1, M_1, Re_kp);
+    Rekr(Re_kr2, T_ct, Trl_2, M_2, Re_kp);
+
+    double xkr1 = Re_kr1 * mu_1 / (v_1 * ro_1);
+    double xkr2 = Re_kr2 * mu_2 / (v_2 * ro_2);
+
+    // Длина грани (в метрах)
+    double L = (b / (2 * cos(beta))) / 1000.0;
+
+    cout << "\n\nПереход:\nRe_kr1=" << Re_kr1 << " xkr1=" << xkr1
+         << "\nRe_kr2=" << Re_kr2 << " xkr2=" << xkr2
+         << "\nL=" << L << " (м)\n";
+
+    // ===================== Пункт 8 =====================
+    // 1) Находим δл (сжимаемое) в критическом сечении (точка 2 на грани 1 и точка 11 на грани 2)
+    // ---- Грань 1: x = xkr1 ----
+    double Re_ns, d_ns, tau_ns, cfx_ns, cf_ns, ds_ns, dss_ns;
+    double d_c,  tau_c,  cfx_c,  cf_c,  ds_c,  dss_c;
+
+    LamNes(Re_ns, d_ns, tau_ns, cfx_ns, cf_ns, ds_ns, dss_ns, v_1, ro_1, xkr1, mu_1);
+    LamS(d_c, tau_c, cfx_c, cf_c, ds_c, dss_c, d_ns, tau_ns, cfx_ns, cf_ns, ds_ns, dss_ns, Toprl_1, T_1, n_visc);
+    double delta_l_kr1 = d_c;
+
+    // ---- Грань 2: x = xkr2 ----
+    LamNes(Re_ns, d_ns, tau_ns, cfx_ns, cf_ns, ds_ns, dss_ns, v_2, ro_2, xkr2, mu_2);
+    LamS(d_c, tau_c, cfx_c, cf_c, ds_c, dss_c, d_ns, tau_ns, cfx_ns, cf_ns, ds_ns, dss_ns, Toprl_2, T_2, n_visc);
+    double delta_l_kr2 = d_c;
+
+    // 2) Δx1, Δx2 (из условия δл=δт)
+    double dX1 = CalcDeltaX(delta_l_kr1, v_1, ro_1, mu_1, Toprt_1, T_1, n_visc);
+    double dX2 = CalcDeltaX(delta_l_kr2, v_2, ro_2, mu_2, Toprt_2, T_2, n_visc);
+
+    cout << "\nΔx1 = " << dX1 << " м (ожидаемо около 0.04)\n";
+    cout << "Δx2 = " << dX2 << " м\n";
+
+    // 3) Координаты x (как в методичке) + xf
+    double x[18];
+    // Грань 1 (1..6)
+    x[0] = xkr1 / 2;
+    x[1] = xkr1;
+    x[2] = xkr1;
+    x[3] = xkr1 + (L - xkr1) / 3.0;
+    x[4] = L - (L - xkr1) / 3.0;
+    x[5] = L;
+
+    // Грань 3 (7..9)
+    x[6] = 0.0;
+    x[7] = L / 2.0;
+    x[8] = L;
+
+    // Грань 2 (10..15)
+    x[9]  = xkr2 / 2;
+    x[10] = xkr2;
+    x[11] = xkr2;
+    x[12] = xkr2 + (L - xkr2) / 3.0;
+    x[13] = L - (L - xkr2) / 3.0;
+    x[14] = L;
+
+    // Грань 4 (16..18)
+    x[15] = 0.0;
+    x[16] = L / 2.0;
+    x[17] = L;
+
+    // xf
+    double xf[18] = {};
+
+    // Грань 1: точки 1-2 ламинарные => xf=x; точки 3-6 турбулентные => xf=Δx+(x-xkr)
+    xf[0] = x[0];
+    xf[1] = x[1];
+    for (int i = 2; i <= 5; ++i) xf[i] = dX1 + (x[i] - xkr1);
+
+    // Грань 2: точки 10-11 ламинарные; 12-15 турбулентные
+    xf[9]  = x[9];
+    xf[10] = x[10];
+    for (int i = 11; i <= 14; ++i) xf[i] = dX2 + (x[i] - xkr2);
+
+    // 4) Найдём δ в конце грани 1 (точка 6) и конца грани 2 (точка 15),
+    //    чтобы построить фиктивную пластину для граней 3 и 4.
+    auto CalcTurbPoint = [&](double V, double rho, double mu, double xfi, double Tstar, double Tedge) {
+        BLRow row{};
+        TurNes(row.Re, row.delta_ns, row.tau_ns, row.cfx_ns, row.cf_ns, row.dstar_ns, row.dss_ns, V, rho, xfi, mu);
+        TurS(row.delta, row.tau, row.cfx, row.cf, row.dstar, row.dss,
+             row.delta_ns, row.tau_ns, row.cfx_ns, row.cf_ns, row.dstar_ns, row.dss_ns, Tstar, Tedge, n_visc);
+        return row;
+    };
+
+    BLRow end1 = CalcTurbPoint(v_1, ro_1, mu_1, xf[5], Toprt_1, T_1);
+    BLRow end2 = CalcTurbPoint(v_2, ro_2, mu_2, xf[14], Toprt_2, T_2);
+
+    double xf3_0 = CalcXfromDeltaTurb(end1.delta, v_3, ro_3, mu_3, Toprt_3, T_3, n_visc);
+    double xf4_0 = CalcXfromDeltaTurb(end2.delta, v_4, ro_4, mu_4, Toprt_4, T_4, n_visc);
+
+    // Грань 3: xf = xf3_0 + x
+    xf[6] = xf3_0 + x[6];
+    xf[7] = xf3_0 + x[7];
+    xf[8] = xf3_0 + x[8];
+
+    // Грань 4: xf = xf4_0 + x
+    xf[15] = xf4_0 + x[15];
+    xf[16] = xf4_0 + x[16];
+    xf[17] = xf4_0 + x[17];
+
+    cout << "\nxf3_0 = " << xf3_0 << " м, xf4_0 = " << xf4_0 << " м\n";
+
+    // 5) Считаем 18 точек и выводим таблицу
+    vector<BLRow> rows;
+    rows.reserve(18);
+
+    auto AddLaminar = [&](int face, int pt, double xval, double xfval,
+                          double V, double rho, double mu, double Tstar_lam, double Tedge)
+    {
+        BLRow r{};
+        r.face = face; r.point = pt; r.x = xval; r.xf = xfval;
+
+        LamNes(r.Re, r.delta_ns, r.tau_ns, r.cfx_ns, r.cf_ns, r.dstar_ns, r.dss_ns, V, rho, xval, mu);
+        LamS(r.delta, r.tau, r.cfx, r.cf, r.dstar, r.dss,
+             r.delta_ns, r.tau_ns, r.cfx_ns, r.cf_ns, r.dstar_ns, r.dss_ns, Tstar_lam, Tedge, n_visc);
+
+        rows.push_back(r);
+    };
+
+    auto AddTurb = [&](int face, int pt, double xval, double xfval,
+                       double V, double rho, double mu, double Tstar_turb, double Tedge)
+    {
+        BLRow r{};
+        r.face = face; r.point = pt; r.x = xval; r.xf = xfval;
+
+        TurNes(r.Re, r.delta_ns, r.tau_ns, r.cfx_ns, r.cf_ns, r.dstar_ns, r.dss_ns, V, rho, xfval, mu);
+        TurS(r.delta, r.tau, r.cfx, r.cf, r.dstar, r.dss,
+             r.delta_ns, r.tau_ns, r.cfx_ns, r.cf_ns, r.dstar_ns, r.dss_ns, Tstar_turb, Tedge, n_visc);
+
+        rows.push_back(r);
+    };
+
+    // Грань 1: точки 1-2 ламинарные
+    AddLaminar(1, 1, x[0], xf[0], v_1, ro_1, mu_1, Toprl_1, T_1);
+    AddLaminar(1, 2, x[1], xf[1], v_1, ro_1, mu_1, Toprl_1, T_1);
+    // Грань 1: точки 3-6 турбулентные (через xf)
+    AddTurb(1, 3, x[2], xf[2], v_1, ro_1, mu_1, Toprt_1, T_1);
+    AddTurb(1, 4, x[3], xf[3], v_1, ro_1, mu_1, Toprt_1, T_1);
+    AddTurb(1, 5, x[4], xf[4], v_1, ro_1, mu_1, Toprt_1, T_1);
+    AddTurb(1, 6, x[5], xf[5], v_1, ro_1, mu_1, Toprt_1, T_1);
+
+    // Грань 3: точки 7-9 турбулентные с фиктивной пластиной xf3_0
+    AddTurb(3, 7, x[6], xf[6], v_3, ro_3, mu_3, Toprt_3, T_3);
+    AddTurb(3, 8, x[7], xf[7], v_3, ro_3, mu_3, Toprt_3, T_3);
+    AddTurb(3, 9, x[8], xf[8], v_3, ro_3, mu_3, Toprt_3, T_3);
+
+    // Грань 2: точки 10-11 ламинарные
+    AddLaminar(2, 10, x[9],  xf[9],  v_2, ro_2, mu_2, Toprl_2, T_2);
+    AddLaminar(2, 11, x[10], xf[10], v_2, ro_2, mu_2, Toprl_2, T_2);
+    // Грань 2: точки 12-15 турбулентные
+    AddTurb(2, 12, x[11], xf[11], v_2, ro_2, mu_2, Toprt_2, T_2);
+    AddTurb(2, 13, x[12], xf[12], v_2, ro_2, mu_2, Toprt_2, T_2);
+    AddTurb(2, 14, x[13], xf[13], v_2, ro_2, mu_2, Toprt_2, T_2);
+    AddTurb(2, 15, x[14], xf[14], v_2, ro_2, mu_2, Toprt_2, T_2);
+
+    // Грань 4: точки 16-18 турбулентные с фиктивной пластиной xf4_0
+    AddTurb(4, 16, x[15], xf[15], v_4, ro_4, mu_4, Toprt_4, T_4);
+    AddTurb(4, 17, x[16], xf[16], v_4, ro_4, mu_4, Toprt_4, T_4);
+    AddTurb(4, 18, x[17], xf[17], v_4, ro_4, mu_4, Toprt_4, T_4);
+
+    PrintBLTable(rows);
+
+    return 0;
+}
