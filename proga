@@ -677,6 +677,20 @@ int main() {
     cout << "\nΔx1 = " << deltaX1 << " м";
     cout << "\nΔx2 = " << deltaX2 << " м";
 
+    // Дополнительный вывод Δx в формате, как в методичке (Δx, 10^-2 м)
+    {
+        ios::fmtflags oldFlags = cout.flags();
+        streamsize oldPrec = cout.precision();
+
+        cout << "\n\nОпределение Δx по формуле (Δx, 10^-2 м):\n";
+        cout << fixed << setprecision(2);
+        cout << "Δx1 = " << (deltaX1 * 1e2) << "\n";
+        cout << "Δx2 = " << (deltaX2 * 1e2) << "\n";
+
+        cout.flags(oldFlags);
+        cout.precision(oldPrec);
+    }
+
     // 2) Толщина δ в конце граней 1 и 2 (для перехода на грань 3 и 4 соответственно)
     double Re_tmp, dlt_tmp, tau_tmp, cfx_tmp, cf_tmp, dltst_tmp, dltsq_tmp;
     double DLT_tmp, TAU_tmp, CFX_tmp, CF_tmp, DLTst_tmp, DLTsq_tmp;
@@ -824,5 +838,58 @@ int main() {
     for (int i = 0; i < 18; ++i) PrintBLRow(rows[i]);
 
 
-}
+    // ===================== Пункт 9: вывод сил трения по граням =====================
+    // (коэффициенты трения в программе уже посчитаны; здесь добавлен только вывод сил)
+    {
+        // Средние коэффициенты трения по граням (Cfср) в сжимаемом ПС
 
+        // --- Грань 1: смешанный ПС (ламинарный + турбулентный) ---
+        const double Cf_lam_1 = rows[1].cf;   // точка 2: средний Cf на участке 0..xкр1 (ламинарный)
+        const double Cf_t1_1  = rows[5].cf;   // точка 6: средний Cf на участке 0..(L-xкр1+Δx1) (турбулентный)
+        const double Cf_t2_1  = rows[2].cf;   // точка 3: средний Cf на участке 0..Δx1 (турбулентный)
+        const double l1 = xf_end1;            // (L - xкр1 + Δx1)
+        const double Cf_face1 = Cf_lam_1 * (xkr1 / L_m) + Cf_t1_1 * (l1 / L_m) - Cf_t2_1 * (deltaX1 / L_m);
+
+        // --- Грань 2: смешанный ПС (ламинарный + турбулентный) ---
+        const double Cf_lam_2 = rows[10].cf;  // точка 11: средний Cf на участке 0..xкр2 (ламинарный)
+        const double Cf_t1_2  = rows[14].cf;  // точка 15: средний Cf на участке 0..(L-xкр2+Δx2) (турбулентный)
+        const double Cf_t2_2  = rows[11].cf;  // точка 12: средний Cf на участке 0..Δx2 (турбулентный)
+        const double l2 = xf_end2;            // (L - xкр2 + Δx2)
+        const double Cf_face2 = Cf_lam_2 * (xkr2 / L_m) + Cf_t1_2 * (l2 / L_m) - Cf_t2_2 * (deltaX2 / L_m);
+
+        // --- Грани 3 и 4: турбулентный ПС с фиктивной длиной ---
+        const double Cf_face3 = rows[8].cf;   // точка 9: средний Cf по длине грани 3
+        const double Cf_face4 = rows[17].cf;  // точка 18: средний Cf по длине грани 4
+
+        // Скоростные напоры по граням
+        const double q1 = 0.5 * ro_1 * v_1 * v_1;
+        const double q2 = 0.5 * ro_2 * v_2 * v_2;
+        const double q3 = 0.5 * ro_3 * v_3 * v_3;
+        const double q4 = 0.5 * ro_4 * v_4 * v_4;
+
+        // Силы трения по граням (Н при единичном размахе), формула (56): Fтр_i = Cfср_i * q_i * L
+        const double Ftr1 = Cf_face1 * q1 * L_m;
+        const double Ftr2 = Cf_face2 * q2 * L_m;
+        const double Ftr3 = Cf_face3 * q3 * L_m;
+        const double Ftr4 = Cf_face4 * q4 * L_m;
+
+        cout << "\n\n9. Определение поправки на трение";
+        cout << "\nТабл. 8. Средние коэффициенты трения по граням:";
+        cout << "\nCfср1 = " << Cf_face1 * 1e3 << " *10^-3";
+        cout << "\nCfср2 = " << Cf_face2 * 1e3 << " *10^-3";
+        cout << "\nCfср3 = " << Cf_face3 * 1e3 << " *10^-3";
+        cout << "\nCfср4 = " << Cf_face4 * 1e3 << " *10^-3";
+
+        cout << "\n\nСилы трения по граням (Н при единичном размахе):";
+        cout << "\nFтр1 = " << Ftr1;
+        cout << "\nFтр2 = " << Ftr2;
+        cout << "\nFтр3 = " << Ftr3;
+        cout << "\nFтр4 = " << Ftr4;
+
+        // При необходимости: суммарная продольная составляющая трения (57)
+        const double Xtr = (Ftr1 + Ftr2 + Ftr3 + Ftr4) * cos(beta);
+        cout << "\n\nXтр = " << Xtr;
+    }
+
+
+}
